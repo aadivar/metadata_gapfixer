@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<doi_batch xmlns="http://www.crossref.org/schema/5.3.1"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xmlns:jats="http://www.ncbi.nlm.nih.gov/JATS1"
+           xmlns:fr="http://www.crossref.org/fundref.xsd"
+           xmlns:ai="http://www.crossref.org/AccessIndicators.xsd"
+           xsi:schemaLocation="http://www.crossref.org/schema/5.3.1 https://www.crossref.org/schemas/crossref5.3.1.xsd"
+           version="5.3.1">
+  <head>
+    <doi_batch_id>{{ batch_id }}</doi_batch_id>
+    <timestamp>{{ timestamp }}</timestamp>
+    <depositor>
+      <depositor_name>{{ depositor_name | e }}</depositor_name>
+      <email_address>{{ depositor_email | e }}</email_address>
+    </depositor>
+    <registrant>{{ registrant | e }}</registrant>
+  </head>
+  <body>
+    <journal>
+      <journal_metadata language="{{ m.language or 'en' }}">
+        {% if m.journal_title %}<full_title>{{ m.journal_title | e }}</full_title>{% endif %}
+        {% if m.journal_abbrev %}<abbrev_title>{{ m.journal_abbrev | e }}</abbrev_title>{% endif %}
+        {% if m.issn_print %}<issn media_type="print">{{ m.issn_print | e }}</issn>{% endif %}
+        {% if m.issn_electronic %}<issn media_type="electronic">{{ m.issn_electronic | e }}</issn>{% endif %}
+      </journal_metadata>
+      {% if m.volume or m.issue or pub_year %}
+      <journal_issue>
+        {% if pub_year %}
+        <publication_date media_type="online">
+          {% if pub_month %}<month>{{ pub_month }}</month>{% endif %}
+          {% if pub_day %}<day>{{ pub_day }}</day>{% endif %}
+          <year>{{ pub_year }}</year>
+        </publication_date>
+        {% endif %}
+        {% if m.volume %}<journal_volume><volume>{{ m.volume | e }}</volume></journal_volume>{% endif %}
+        {% if m.issue %}<issue>{{ m.issue | e }}</issue>{% endif %}
+      </journal_issue>
+      {% endif %}
+      <journal_article publication_type="full_text" language="{{ m.language or 'en' }}">
+        <titles>
+          <title>{{ m.title | e }}</title>
+          {% if m.subtitle %}<subtitle>{{ m.subtitle | e }}</subtitle>{% endif %}
+        </titles>
+        {% if m.authors %}
+        <contributors>
+          {% for a in m.authors %}
+          <person_name sequence="{{ 'first' if loop.first else 'additional' }}" contributor_role="author">
+            {% if a.given_name %}<given_name>{{ a.given_name | e }}</given_name>{% endif %}
+            <surname>{{ (a.surname or a.full_name or '') | e }}</surname>
+            {% if a.affiliations %}
+            <affiliations>
+              {% for aff in a.affiliations %}
+              <institution>
+                <institution_name>{{ aff | e }}</institution_name>
+                {% if a.ror_ids and loop.index0 < a.ror_ids|length and a.ror_ids[loop.index0] %}
+                <institution_id type="ror">{{ a.ror_ids[loop.index0] }}</institution_id>
+                {% endif %}
+              </institution>
+              {% endfor %}
+            </affiliations>
+            {% endif %}
+            {% if a.orcid %}<ORCID authenticated="false">https://orcid.org/{{ a.orcid }}</ORCID>{% endif %}
+          </person_name>
+          {% endfor %}
+        </contributors>
+        {% endif %}
+        {% if m.abstract %}
+        <jats:abstract>
+          <jats:p>{{ m.abstract | e }}</jats:p>
+        </jats:abstract>
+        {% endif %}
+        {% if pub_year %}
+        <publication_date media_type="online">
+          {% if pub_month %}<month>{{ pub_month }}</month>{% endif %}
+          {% if pub_day %}<day>{{ pub_day }}</day>{% endif %}
+          <year>{{ pub_year }}</year>
+        </publication_date>
+        {% endif %}
+        {% if m.first_page %}
+        <pages>
+          <first_page>{{ m.first_page | e }}</first_page>
+          {% if m.last_page %}<last_page>{{ m.last_page | e }}</last_page>{% endif %}
+        </pages>
+        {% endif %}
+        {% if m.funders %}
+        <fr:program name="fundref">
+          {% for f in m.funders %}
+          <fr:assertion name="fundgroup">
+            <fr:assertion name="funder_name">{{ f.name | e }}{% if f.doi %} <fr:assertion name="funder_identifier">{{ f.doi }}</fr:assertion>{% endif %}</fr:assertion>
+            {% for award in f.award_numbers %}
+            <fr:assertion name="award_number">{{ award | e }}</fr:assertion>
+            {% endfor %}
+          </fr:assertion>
+          {% endfor %}
+        </fr:program>
+        {% endif %}
+        {% if m.license_url %}
+        <ai:program name="AccessIndicators">
+          <ai:license_ref>{{ m.license_url | e }}</ai:license_ref>
+        </ai:program>
+        {% endif %}
+        {% if m.doi %}
+        <doi_data>
+          <doi>{{ m.doi }}</doi>
+          {% if m.resource_url %}<resource>{{ m.resource_url | e }}</resource>{% endif %}
+        </doi_data>
+        {% endif %}
+        {% if m.references %}
+        <citation_list>
+          {% for r in m.references %}
+          <citation key="ref{{ loop.index }}">
+            {% if r.doi %}<doi>{{ r.doi }}</doi>{% endif %}
+            {% if r.year %}<cYear>{{ r.year }}</cYear>{% endif %}
+            {% if r.title %}<article_title>{{ r.title | e }}</article_title>{% endif %}
+            <unstructured_citation>{{ r.raw | e }}</unstructured_citation>
+          </citation>
+          {% endfor %}
+        </citation_list>
+        {% endif %}
+      </journal_article>
+    </journal>
+  </body>
+</doi_batch>

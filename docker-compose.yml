@@ -1,0 +1,66 @@
+name: metadata-gapfixer
+
+services:
+  docling:
+    image: ghcr.io/docling-project/docling-serve:latest
+    container_name: mgf-docling
+    restart: unless-stopped
+    environment:
+      DOCLING_SERVE_ENABLE_UI: "false"
+      DOCLING_SERVE_API_HOST: "0.0.0.0"
+    ports:
+      - "5001:5001"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    platform: linux/arm64
+    container_name: mgf-backend
+    restart: unless-stopped
+    depends_on:
+      docling:
+        condition: service_healthy
+    environment:
+      DOCLING_BASE_URL: "http://docling:5001"
+      DATA_DIR: "/data"
+      SQLITE_PATH: "/data/mgf.db"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:?set OPENAI_API_KEY in .env}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
+      CONTACT_EMAIL: "${CONTACT_EMAIL:-anonymous@example.org}"
+      GLINER_MODEL: "${GLINER_MODEL:-fastino/gliner2-large-v1}"
+      HF_HOME: "/data/hf-cache"
+    volumes:
+      - ./data:/data
+      - ./backend/app:/app/app
+      - ./backend/templates:/app/templates
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: mgf-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      VITE_API_BASE_URL: "http://localhost:8000"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+    ports:
+      - "3000:3000"
