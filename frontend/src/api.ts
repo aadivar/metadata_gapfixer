@@ -286,3 +286,25 @@ export async function locateField(
   }
   return r.json();
 }
+
+export async function locateAuthorsAffiliations(
+  id: number,
+  page: number,
+  authorBoxIds: number[],
+  affiliationBoxIds: number[]
+): Promise<{ report: any; score: Scorecard }> {
+  const r = await fetch(`${API}/submissions/${id}/locate/authors_affiliations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      page,
+      author_box_ids: authorBoxIds,
+      affiliation_box_ids: affiliationBoxIds,
+    }),
+  });
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`locate authors/affiliations failed: ${r.status} ${text}`);
+  }
+  return r.json();
+}

@@ -13,6 +13,7 @@ import {
   getPageBoxes,
   getScore,
   LayoutBox,
+  locateAuthorsAffiliations,
   locateField,
   pageImageUrl,
   PageInfo,
@@ -278,6 +279,17 @@ export default function Review() {
         {err && <p className="error" style={{ marginTop: 12 }}>{err}</p>}
         {toast && <p className="toast">{toast}</p>}
       </div>
+
+      {/* COMBINED AUTHORS + AFFILIATIONS SUPERCARD (T1) */}
+      <AuthorsAffiliationsSuperCard
+        subId={subId}
+        card={card}
+        busy={busy !== null}
+        onUpdate={async () => { await refresh(); }}
+        showToast={showToast}
+        setBusy={setBusy}
+        setErr={setErr}
+      />
 
       {/* PER-TIER FIELD CARDS */}
       {TIER_ORDER.map((tier) => {
@@ -611,6 +623,271 @@ const STATE_INFO: Record<CardState, { icon: string; color: string; label: string
   missing:      { icon: "○", color: "var(--fg-tertiary)", label: "Missing" },
   manual:       { icon: "✎", color: "var(--info)",  label: "Needs you" },
 };
+
+// ============================================================================
+// Authors + Affiliations supercard — single combined interaction
+// ============================================================================
+
+function AuthorsAffiliationsSuperCard({
+  subId, card, busy, onUpdate, showToast, setBusy, setErr,
+}: {
+  subId: number;
+  card: Scorecard;
+  busy: boolean;
+  onUpdate: () => Promise<void>;
+  showToast: (msg: string) => void;
+  setBusy: (s: string | null) => void;
+  setErr: (s: string | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  // Read current state from the rubric
+  const fAuthors = card.fields.find((f) => f.key === "authors_any");
+  const fAffils  = card.fields.find((f) => f.key === "affiliations_listed");
+  const fNames   = card.fields.find((f) => f.key === "full_author_names");
+  const fROR     = card.fields.find((f) => f.key === "ror_for_all_affiliations");
+
+  if (!fAuthors || !fAffils) return null;
+
+  const authorsState = deriveState(fAuthors);
+  const affilsState  = deriveState(fAffils);
+  const allDone = authorsState === "confirmed" && affilsState === "confirmed";
+
+  return (
+    <div className="card supercard">
+      <div className="row">
+        <div>
+          <h2 className="card-title" style={{ margin: 0 }}>
+            ✨ Authors &amp; Affiliations workspace
+          </h2>
+          <p className="muted small" style={{ margin: "4px 0 0" }}>
+            One linked interaction for both — authors and affiliations are tied
+            via superscript markers, so we structure them together.
+          </p>
+        </div>
+        <span className="mono small">
+          {allDone ? "✓ both confirmed" : "needs your eyes"}
+        </span>
+      </div>
+
+      <div className="supercard-stats">
+        <div className="supercard-stat">
+          <div className="muted small">Authors</div>
+          <div className="supercard-stat-val">{fAuthors.value_preview ?? "—"}</div>
+        </div>
+        <div className="supercard-stat">
+          <div className="muted small">Affiliations</div>
+          <div className="supercard-stat-val">{fAffils.value_preview ?? "—"}</div>
+        </div>
+        {fNames && (
+          <div className="supercard-stat">
+            <div className="muted small">Given+surname split</div>
+            <div className="supercard-stat-val">{fNames.value_preview ?? "—"}</div>
+          </div>
+        )}
+        {fROR && (
+          <div className="supercard-stat">
+            <div className="muted small">ROR coverage</div>
+            <div className="supercard-stat-val">{fROR.value_preview ?? "—"}</div>
+          </div>
+        )}
+      </div>
+
+      <div className="actions">
+        <button className="primary" onClick={() => setOpen((v) => !v)} disabled={busy}>
+          {open ? "Close" : "📍 Locate authors + affiliations together"}
+        </button>
+      </div>
+
+      {open && (
+        <AuthorsAffiliationsLocate
+          subId={subId}
+          onCancel={() => setOpen(false)}
+          onSubmit={async (page, authorIds, affilIds) => {
+            setBusy("Structuring authors & affiliations…");
+            setErr(null);
+            try {
+              const res = await locateAuthorsAffiliations(subId, page, authorIds, affilIds);
+              await onUpdate();
+              showToast(`Linked ${res.report?.authors_count ?? 0} authors with affiliations`);
+              setOpen(false);
+            } catch (e) {
+              setErr(String(e));
+            } finally {
+              setBusy(null);
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+type LocateMode = "authors" | "affiliations";
+
+function AuthorsAffiliationsLocate({
+  subId, onCancel, onSubmit,
+}: {
+  subId: number;
+  onCancel: () => void;
+  onSubmit: (page: number, authorIds: number[], affilIds: number[]) => Promise<void>;
+}) {
+  const [pages, setPages] = useState<PageInfo[]>([]);
+  const [pageNo, setPageNo] = useState(1);
+  const [boxes, setBoxes] = useState<LayoutBox[]>([]);
+  const [mode, setMode] = useState<LocateMode>("authors");
+  const [authorIds, setAuthorIds] = useState<Set<number>>(new Set());
+  const [affilIds, setAffilIds] = useState<Set<number>>(new Set());
+  const [err, setErr] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const pp = await getPages(subId);
+        if (pp.page_count === 0) {
+          setErr("No layout — DOCX uploads can't use Locate.");
+        } else {
+          setPages(pp.pages);
+        }
+      } catch (e) { setErr(String(e)); }
+    })();
+  }, [subId]);
+
+  useEffect(() => {
+    if (pages.length === 0) return;
+    (async () => {
+      try {
+        const r = await getPageBoxes(subId, pageNo);
+        setBoxes(r.boxes);
+      } catch (e) { setErr(String(e)); }
+    })();
+  }, [subId, pageNo, pages.length]);
+
+  function toggleBox(id: number) {
+    // A box can be in either set, but not both. Clicking in author-mode
+    // adds to authors and removes from affiliations (and vice versa).
+    if (mode === "authors") {
+      setAffilIds((prev) => { const n = new Set(prev); n.delete(id); return n; });
+      setAuthorIds((prev) => {
+        const n = new Set(prev);
+        if (n.has(id)) n.delete(id); else n.add(id);
+        return n;
+      });
+    } else {
+      setAuthorIds((prev) => { const n = new Set(prev); n.delete(id); return n; });
+      setAffilIds((prev) => {
+        const n = new Set(prev);
+        if (n.has(id)) n.delete(id); else n.add(id);
+        return n;
+      });
+    }
+  }
+
+  async function save() {
+    if (authorIds.size === 0 && affilIds.size === 0) {
+      setErr("Tag at least one box.");
+      return;
+    }
+    setErr(null);
+    setSubmitting(true);
+    try {
+      await onSubmit(pageNo, [...authorIds], [...affilIds]);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (err && pages.length === 0) {
+    return <div className="locate-panel"><p className="error">{err}</p></div>;
+  }
+  if (pages.length === 0) {
+    return <div className="locate-panel"><p className="muted loading">Loading page</p></div>;
+  }
+
+  const currentPage = pages.find((p) => p.page === pageNo);
+
+  return (
+    <div className="locate-panel">
+      <div className="locate-controls">
+        <button className="ghost" onClick={() => setPageNo((p) => Math.max(1, p - 1))} disabled={pageNo <= 1}>← Prev</button>
+        <span className="muted small">
+          Page <input type="number" min={1} max={pages.length} value={pageNo}
+            onChange={(e) => setPageNo(Math.max(1, Math.min(pages.length, Number(e.target.value))))}
+            style={{ width: 50 }} /> of {pages.length}
+        </span>
+        <button className="ghost" onClick={() => setPageNo((p) => Math.min(pages.length, p + 1))} disabled={pageNo >= pages.length}>Next →</button>
+        <span className="spacer" />
+        <span className="muted small">{boxes.length} boxes · {authorIds.size} authors · {affilIds.size} affs</span>
+      </div>
+
+      <div className="mode-toggle">
+        <span className="muted small">Tag boxes as:</span>
+        <button
+          className={`mode-btn mode-authors ${mode === "authors" ? "active" : ""}`}
+          onClick={() => setMode("authors")}
+        >
+          ● Authors ({authorIds.size})
+        </button>
+        <button
+          className={`mode-btn mode-affils ${mode === "affiliations" ? "active" : ""}`}
+          onClick={() => setMode("affiliations")}
+        >
+          ● Affiliations ({affilIds.size})
+        </button>
+        <span className="spacer" />
+        <button className="ghost" onClick={() => { setAuthorIds(new Set()); setAffilIds(new Set()); }}>Clear all</button>
+        <button className="ghost" onClick={onCancel}>Cancel</button>
+        <button className="primary" onClick={save} disabled={submitting || (authorIds.size === 0 && affilIds.size === 0)}>
+          {submitting ? "Structuring…" : "✨ Extract linked authors  (~$0.0006)"}
+        </button>
+      </div>
+
+      <div
+        className="page-canvas-wrap locate-canvas"
+        style={currentPage ? { aspectRatio: `${currentPage.w_px} / ${currentPage.h_px}` } : undefined}
+      >
+        {currentPage && (
+          <>
+            <img src={pageImageUrl(subId, pageNo)} draggable={false} />
+            <div className="overlay-layer">
+              {boxes.map((b) => {
+                const isAuthor = authorIds.has(b.id);
+                const isAffil = affilIds.has(b.id);
+                let color = "rgba(124, 92, 255, 0.25)";
+                let bg = "transparent";
+                let cls = "";
+                if (isAuthor) { color = "#f87171"; bg = "rgba(248, 113, 113, 0.18)"; cls = "selected"; }
+                else if (isAffil) { color = "#60a5fa"; bg = "rgba(96, 165, 250, 0.18)"; cls = "selected"; }
+                return (
+                  <div
+                    key={b.id}
+                    className={`box ${cls}`}
+                    style={{
+                      left: `${(b.bbox.x / currentPage.w_px) * 100}%`,
+                      top: `${(b.bbox.y / currentPage.h_px) * 100}%`,
+                      width: `${(b.bbox.w / currentPage.w_px) * 100}%`,
+                      height: `${(b.bbox.h / currentPage.h_px) * 100}%`,
+                      borderColor: color,
+                      background: bg,
+                    }}
+                    title={b.text.slice(0, 120)}
+                    onClick={() => toggleBox(b.id)}
+                  />
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+
+      {err && <p className="error" style={{ marginTop: 8 }}>{err}</p>}
+    </div>
+  );
+}
+
 
 function LeverageBadge({ leverage }: { leverage: "deterministic" | "api" | "ai" }) {
   const cfg = {

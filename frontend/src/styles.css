@@ -807,6 +807,53 @@ td code { color: var(--accent); background: var(--accent-soft); padding: 2px 6px
   border-color: rgba(96, 165, 250, 0.25);
 }
 
+/* ─── Authors+Affiliations supercard ─── */
+.supercard {
+  background: linear-gradient(180deg, var(--accent-soft) 0%, var(--bg-surface) 80%);
+  border-color: rgba(124, 92, 255, 0.25);
+}
+.supercard-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin: 16px 0 8px;
+}
+.supercard-stat {
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+.supercard-stat-val {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--fg-primary);
+  margin-top: 4px;
+}
+
+/* Two-color mode toggle for authors+affiliations locate */
+.mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0;
+  flex-wrap: wrap;
+}
+.mode-btn {
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  color: var(--fg-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+}
+.mode-btn.mode-authors { color: #f87171; border-color: rgba(248, 113, 113, 0.3); }
+.mode-btn.mode-affils  { color: #60a5fa; border-color: rgba(96, 165, 250, 0.3); }
+.mode-btn.active.mode-authors { background: rgba(248, 113, 113, 0.18); border-color: #f87171; }
+.mode-btn.active.mode-affils  { background: rgba(96, 165, 250, 0.18); border-color: #60a5fa; }
+
 /* ─── Inline LocatePanel ─── */
 .locate-panel {
   margin-top: 12px;

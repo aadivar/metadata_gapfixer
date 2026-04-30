@@ -155,10 +155,21 @@ def _docling_page1_text(docling_doc: dict) -> tuple[str, str]:
 
 
 def structure_authors(meta: dict, fs: Factsheet, docling_doc: dict, *,
-                      sub_id: int | None = None) -> dict:
-    """LLM-structured authors + affiliations. Replaces meta['authors']."""
-    author_block, affil_block = _docling_page1_text(docling_doc)
-    if not author_block.strip() and not affil_block.strip():
+                      sub_id: int | None = None,
+                      override_blocks: dict | None = None) -> dict:
+    """LLM-structured authors + affiliations. Replaces meta['authors'].
+
+    If `override_blocks` is provided (with keys 'author_block' and
+    'affiliation_block'), uses those texts directly — typically populated
+    from editor box-selection on the page render. Otherwise falls back to
+    the heuristic page-1 split from Docling.
+    """
+    if override_blocks:
+        author_block = (override_blocks.get("author_block") or "").strip()
+        affil_block = (override_blocks.get("affiliation_block") or "").strip()
+    else:
+        author_block, affil_block = _docling_page1_text(docling_doc)
+    if not author_block and not affil_block:
         return {"ok": False, "error": "no title-page text found"}
 
     user_payload = json.dumps({

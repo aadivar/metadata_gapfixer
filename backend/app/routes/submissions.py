@@ -535,6 +535,76 @@ def post_locate(sub_id: int, req: LocateRequest):
     }
 
 
+class LocateAuthorsAffiliationsRequest(BaseModel):
+    page: int
+    author_box_ids: list[int] = []
+    affiliation_box_ids: list[int] = []
+
+
+@router.post("/{sub_id}/locate/authors_affiliations")
+def post_locate_authors_affiliations(sub_id: int, req: LocateAuthorsAffiliationsRequest):
+    """Editor tagged boxes on a page as authors vs. affiliations. Backend joins
+    each set's text and runs the structure_authors LLM call to produce a
+    properly linked author list (with affiliations attached per superscript
+    marker). Single paid call (~$0.0006). Replaces the three sequential
+    interactions for the author/affiliation gap cards."""
+    from ..services.scoring import score
+    from ..services.structurers import structure_authors
+
+    if not req.author_box_ids and not req.affiliation_box_ids:
+        raise HTTPException(400, "select at least one author or affiliation box")
+
+    layout = _load_layout(sub_id)
+    page = next((p for p in layout["pages"] if p["page"] == req.page), None)
+    if not page:
+        raise HTTPException(404, f"page {req.page} not found")
+    boxes_by_id = {b["id"]: b for b in page["boxes"]}
+
+    def _join(ids: list[int]) -> str:
+        out = []
+        for bid in ids:
+            b = boxes_by_id.get(bid)
+            if b and b.get("text"):
+                out.append(b["text"].strip())
+        return "\n".join(out)
+
+    author_text = _join(req.author_box_ids)
+    affil_text = _join(req.affiliation_box_ids)
+
+    fs = _load_factsheet(sub_id)
+    meta = _load_metadata(sub_id)
+    with get_session() as s:
+        sub = s.get(Submission, sub_id)
+        if not sub or not sub.docling_json_path:
+            raise HTTPException(404, "not parsed yet")
+        docling_doc = json.loads(Path(sub.docling_json_path).read_text())
+
+    report = structure_authors(
+        meta, fs, docling_doc, sub_id=sub_id,
+        override_blocks={"author_block": author_text, "affiliation_block": affil_text},
+    )
+
+    # Annotate provenance with the editor's region selection so the publisher
+    # learning loop can replay this on future papers from the same publisher.
+    prov = meta.setdefault("provenance", {})
+    prov["authors"] = {
+        "source": "user_locate+llm_structured",
+        "confidence": 0.95,
+        "confirmed": True,
+        "reasoning": (
+            f"Editor pointed to {len(req.author_box_ids)} author box(es) and "
+            f"{len(req.affiliation_box_ids)} affiliation box(es) on page {req.page}; "
+            f"structure_authors linked them."
+        ),
+        "located_page": req.page,
+        "located_author_box_ids": req.author_box_ids,
+        "located_affiliation_box_ids": req.affiliation_box_ids,
+        "task": "structure_authors",
+    }
+    _save_metadata(sub_id, meta)
+    return {"report": report, "score": score(fs, meta).model_dump()}
+
+
 @router.post("/{sub_id}/reject")
 def post_reject(sub_id: int, req: ConfirmRequest):
     """Editor rejects a field's value. Clears value at path; flips provenance source
