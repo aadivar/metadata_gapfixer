@@ -55,8 +55,17 @@ class JournalArticleMetadata(BaseModel):
     #   "funders[0].doi"
     # Sources: "factsheet" | "regex" | "docling" | "header_parser" | "boilerplate"
     #          | "orcid_api" | "ror_api" | "openalex_api" | "crossref_api"
-    #          | "llm_disambiguated" | "needs_review" | "user_edit"
+    #          | "llm_disambiguated" | "llm_structured" | "needs_review"
+    #          | "needs_pick" | "user_pick" | "user_edit"
     provenance: dict[str, dict] = Field(default_factory=dict)
+
+    # CRediT contributor roles — one entry per author when the paper has an
+    # "Author contributions" section. Populated by the structure_credit task.
+    credit_contributions: list[dict] = Field(default_factory=list)
+
+    # Detected preprint DOI (e.g. bioRxiv) for the version-of-record relation.
+    preprint_doi: Optional[str] = None
+    is_open_access: Optional[bool] = None
 
 
 class SubmissionOut(BaseModel):

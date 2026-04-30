@@ -449,6 +449,50 @@ def post_disambiguate_estimate(sub_id: int, req: DisambiguateRequest):
     return estimate_disambiguation_cost(meta, paths)
 
 
+# --- Structurers (LLM as content structurer, opt-in) ----------------------
+
+class StructureRequest(BaseModel):
+    task: str   # "structure_authors" | "structure_references" | "structure_funding" | "structure_credit"
+
+
+@router.get("/structure/estimate")
+def structure_estimate_all():
+    """Cost estimate for every structurer task (no LLM call, no submission needed)."""
+    from ..services.structurers import estimate_all_structurers
+    return estimate_all_structurers()
+
+
+@router.post("/{sub_id}/structure/{task}/estimate")
+def post_structure_estimate(sub_id: int, task: str):
+    from ..services.structurers import estimate_structurer_cost, STRUCTURERS
+    if task not in STRUCTURERS:
+        raise HTTPException(400, f"unknown structurer: {task}")
+    return estimate_structurer_cost(task)
+
+
+@router.post("/{sub_id}/structure/{task}")
+def post_structure(sub_id: int, task: str):
+    """Run one LLM structurer for this submission. PAID — recorded in cost ledger."""
+    from ..services.scoring import score
+    from ..services.structurers import run_structurer, STRUCTURERS
+
+    if task not in STRUCTURERS:
+        raise HTTPException(400, f"unknown structurer task: {task}")
+
+    fs = _load_factsheet(sub_id)
+    meta = _load_metadata(sub_id)
+    with get_session() as s:
+        sub = s.get(Submission, sub_id)
+        if not sub or not sub.docling_json_path:
+            raise HTTPException(404, "not parsed yet")
+        docling_doc = json.loads(Path(sub.docling_json_path).read_text())
+
+    report = run_structurer(task, meta, fs, docling_doc, sub_id=sub_id)
+    if report.get("ok"):
+        _save_metadata(sub_id, meta)
+    return {"report": report, "score": score(fs, meta).model_dump()}
+
+
 @router.post("/{sub_id}/disambiguate")
 def post_disambiguate(sub_id: int, req: DisambiguateRequest):
     """Run AI disambiguation for one or more specified fields. PAID — every

@@ -44,11 +44,16 @@ TASK_CONFIG: dict[str, TaskConfig] = {
     "name_normalize":     TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=2_000),
     "assemble_metadata":  TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=6_000, max_output_tokens=3_000),
     "preprint_detect":    TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=1_000),
-    # Disambiguation tasks — pick the right candidate from N enricher results.
+    # Picker tasks — pick the right candidate from N enricher results.
     "orcid_pick":         TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=2_000, max_output_tokens=600),
     "ror_pick":           TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=2_000, max_output_tokens=600),
     "funder_pick":        TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=2_000, max_output_tokens=600),
     "reference_pick":     TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=4_000, max_output_tokens=1_000),
+    # Structurer tasks — turn raw content regions into clean structured JSON.
+    "structure_authors":    TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=4_000, max_output_tokens=2_000),
+    "structure_references": TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=8_000, max_output_tokens=3_500),
+    "structure_funding":    TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=2_500, max_output_tokens=1_200),
+    "structure_credit":     TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=3_000, max_output_tokens=1_500),
     "premium":            TaskConfig(model="gpt-4o", max_input_tokens=8_000, max_output_tokens=4_000),
 }
 
@@ -129,6 +134,7 @@ class LLMRouter:
         *,
         override_model: str | None = None,
         cap_usd: float | None = None,
+        strict: bool = True,
     ) -> T:
         """Run a structured-output LLM call for one task.
 
@@ -158,7 +164,7 @@ class LLMRouter:
                 "json_schema": {
                     "name": schema.__name__,
                     "schema": schema.model_json_schema(),
-                    "strict": True,
+                    "strict": strict,
                 },
             },
             temperature=cfg.temperature,
