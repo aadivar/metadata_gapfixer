@@ -63,6 +63,7 @@ RUBRIC: list[FieldDef] = [
     FieldDef(key="volume_issue_pages", label="Volume / issue / pages", tier="T1", weight=5, bucket="medium", autofix_action="crossref_by_doi", llm_leverage="api", why="Crossref-by-DOI lookup."),
     FieldDef(key="license_url",    label="License URL",        tier="T1", weight=6,  bucket="high",   autofix_action="from_factsheet",       llm_leverage="deterministic", why="Defines reuse permissions."),
     FieldDef(key="references_any", label="References (any form)", tier="T1", weight=6, bucket="high", autofix_action="from_docling_refs",    llm_leverage="deterministic", why="Discoverability and citation graph."),
+    FieldDef(key="affiliations_listed", label="Affiliations extracted",        tier="T1", weight=6, bucket="high", autofix_action="from_factsheet", llm_leverage="ai", ai_cost_estimate=0.0006, why="Per-author affiliation strings are required to attach ROR IDs and verify institutions."),
 
     # ─── T2 Linkable ────────────────────────────────────────────────────────
     FieldDef(key="orcid_for_corresponding", label="ORCID for corresponding author", tier="T2", weight=8, bucket="high", autofix_action="resolve_orcids", llm_leverage="ai", ai_cost_estimate=0.001, why="Verified by AI across ORCID + OpenAlex + ROR."),
@@ -200,6 +201,24 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
     if field == "references_any":
         refs = _v("references") or []
         return (len(refs) > 0, f"{len(refs)} refs")
+    if field == "affiliations_listed":
+        # Two angles:
+        #   1) every author has at least one affiliation string attached
+        #   2) we have at least one affiliation overall
+        authors = _v("authors") or [a.model_dump() for a in fs.authors]
+        if not authors:
+            return (False, "no authors yet — extract those first")
+        with_aff = sum(1 for a in authors if (a.get("affiliations") or []))
+        unique_affs = set()
+        for a in authors:
+            for aff in (a.get("affiliations") or []):
+                unique_affs.add(aff.strip())
+        unique_affs.update(s.strip() for s in fs.affiliations.values())
+        unique_affs = {a for a in unique_affs if a}
+        if not unique_affs:
+            return (False, "0 affiliations parsed")
+        ok = with_aff == len(authors)
+        return (ok, f"{len(unique_affs)} unique · {with_aff}/{len(authors)} authors linked")
 
     if field == "orcid_for_corresponding":
         authors = _v("authors") or [a.model_dump() for a in fs.authors]
@@ -216,14 +235,23 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
         return (with_orcid == len(authors), f"{with_orcid}/{len(authors)} have ORCID")
     if field == "ror_for_all_affiliations":
         authors = _v("authors") or [a.model_dump() for a in fs.authors]
-        all_affs = []
+        # Count unique affiliation STRINGS (not per-author dups)
+        unique_affs: set[str] = set()
         for a in authors:
-            all_affs.extend(a.get("affiliations") or [])
-        all_affs += list(fs.affiliations.values())
-        if not all_affs:
-            return (False, "no affiliations")
-        with_ror = sum(1 for a in (_v("authors") or []) if a.get("ror_ids"))
-        return (with_ror > 0 and with_ror >= len(all_affs), f"{with_ror}/{len(all_affs)} have ROR")
+            for aff in (a.get("affiliations") or []):
+                if aff and aff.strip():
+                    unique_affs.add(aff.strip())
+        unique_affs.update(s.strip() for s in fs.affiliations.values() if s and s.strip())
+        if not unique_affs:
+            return (False, "no affiliations to resolve")
+        # Count unique RORs across all authors
+        unique_rors: set[str] = set()
+        for a in authors:
+            for r in (a.get("ror_ids") or []):
+                if r:
+                    unique_rors.add(r)
+        ok = len(unique_rors) >= len(unique_affs)
+        return (ok, f"{len(unique_rors)}/{len(unique_affs)} affiliations have ROR")
     if field == "references_with_doi":
         refs = _v("references") or []
         if not refs:
@@ -282,6 +310,7 @@ _FIELD_KEY_TO_PATHS: dict[str, list[str]] = {
     "publication_date_full": ["publication_date"],
     "volume_issue_pages": ["volume", "issue", "first_page"],
     "license_url": ["license_url"],
+    "affiliations_listed": ["authors"],   # affiliations live as a sub-property of authors
     "preprint_relation": ["preprint_doi"],
     "oa_indicator": ["is_open_access"],
     "conflict_of_interest": ["conflict_of_interest"],
