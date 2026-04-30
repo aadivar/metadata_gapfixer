@@ -33,6 +33,18 @@ const TIER_DESCRIPTION: Record<Tier, string> = {
 
 const TIER_ORDER: Tier[] = ["T0", "T1", "T2", "T3"];
 
+// Fields owned by the Authors & Affiliations supercard at the top.
+// We hide these from the per-tier rendering so the editor doesn't see the
+// same person/affiliation data repeated in five places.
+const SUPERCARD_OWNED_KEYS = new Set<string>([
+  "authors_any",
+  "full_author_names",
+  "affiliations_listed",
+  "orcid_for_corresponding",
+  "orcid_for_all_authors",
+  "ror_for_all_affiliations",
+]);
+
 const HIGH_CONF = 0.9;
 
 function scoreColor(score: number): string {
@@ -223,9 +235,12 @@ export default function Review() {
     );
   }
 
-  // Group fields by tier in declared order
+  // Group fields by tier in declared order — skip fields owned by the supercard
   const fieldsByTier: Record<Tier, FieldScore[]> = { T0: [], T1: [], T2: [], T3: [] };
-  card.fields.forEach((f) => fieldsByTier[f.tier].push(f));
+  card.fields.forEach((f) => {
+    if (SUPERCARD_OWNED_KEYS.has(f.key)) return;
+    fieldsByTier[f.tier].push(f);
+  });
 
   return (
     <section>
@@ -263,17 +278,17 @@ export default function Review() {
         </div>
         <div className="actions">
           <button className="primary" onClick={fixAll} disabled={busy !== null}>
-            ⚡ Auto-fix everything (free)
+            Run automated extraction
           </button>
           {(card.estimated_full_enrichment_usd ?? 0) > 0 && (
             <button onClick={premiumEnrichAll} disabled={busy !== null} title="Run all AI enrichers in sequence">
-              ✨ Premium enrich all  (~${(card.estimated_full_enrichment_usd ?? 0).toFixed(4)})
+              Run AI enrichment<span className="btn-meta">~${(card.estimated_full_enrichment_usd ?? 0).toFixed(4)}</span>
             </button>
           )}
           <button onClick={generateXml} disabled={busy !== null || card.tiers[0].score < 80}>
             Generate Crossref XML
           </button>
-          {xmlBuilt && <a className="btn" href={xmlDownloadUrl(subId)} target="_blank" rel="noreferrer">Download XML ↓</a>}
+          {xmlBuilt && <a className="btn" href={xmlDownloadUrl(subId)} target="_blank" rel="noreferrer">Download XML</a>}
         </div>
         {busy && <p className="muted loading" style={{ marginTop: 12 }}>{busy}</p>}
         {err && <p className="error" style={{ marginTop: 12 }}>{err}</p>}
@@ -405,10 +420,10 @@ function FieldCard({
 
           {state === "confirmed" && (
             <div className="actions">
-              <button className="ghost" onClick={onReject} disabled={busy}>✗ Wrong, locate it</button>
+              <button className="ghost" onClick={onReject} disabled={busy}>Reject and re-identify</button>
               {canLocate && (
                 <button className="ghost" onClick={() => setLocateOpen((v) => !v)} disabled={busy}>
-                  {locateOpen ? "Close locate panel" : "📍 Locate in document"}
+                  {locateOpen ? "Close" : "Identify on document"}
                 </button>
               )}
             </div>
@@ -418,10 +433,10 @@ function FieldCard({
             <>
               {field.provenance_reasoning && <p className="small mono">{field.provenance_reasoning}</p>}
               <div className="actions">
-                <button className="primary" onClick={onConfirm} disabled={busy}>✓ Looks right</button>
-                <button className="ghost" onClick={onReject} disabled={busy}>✗ Wrong, locate it</button>
+                <button className="primary" onClick={onConfirm} disabled={busy}>Confirm</button>
+                <button className="ghost" onClick={onReject} disabled={busy}>Reject and re-identify</button>
                 <button className="ghost" onClick={() => setLocateOpen((v) => !v)} disabled={busy}>
-                  {locateOpen ? "Close locate panel" : "📍 Locate in document"}
+                  {locateOpen ? "Close" : "Identify on document"}
                 </button>
               </div>
             </>
@@ -429,9 +444,9 @@ function FieldCard({
 
           {state === "missing" && (
             <div className="actions">
-              {onAutofix && <button className="primary" onClick={onAutofix} disabled={busy}>Auto-fix (free)</button>}
+              {onAutofix && <button className="primary" onClick={onAutofix} disabled={busy}>Run extraction</button>}
               <button className={onAutofix ? "ghost" : "primary"} onClick={() => setLocateOpen((v) => !v)} disabled={busy}>
-                📍 Locate in document
+                Identify on document
               </button>
             </div>
           )}
@@ -450,7 +465,7 @@ function FieldCard({
           {state === "manual" && (
             <p className="muted small">
               Publisher-policy field. Inline input form lands in the next slice. You can also
-              click <strong>📍 Locate</strong> if the value happens to be in the PDF.
+              click <strong>Identify on document</strong> if the value happens to be in the PDF.
             </p>
           )}
 
@@ -628,6 +643,8 @@ const STATE_INFO: Record<CardState, { icon: string; color: string; label: string
 // Authors + Affiliations supercard — single combined interaction
 // ============================================================================
 
+type SupercardStage = "locate" | "enrich" | "verify" | "done";
+
 function AuthorsAffiliationsSuperCard({
   subId, card, busy, onUpdate, showToast, setBusy, setErr,
 }: {
@@ -640,64 +657,174 @@ function AuthorsAffiliationsSuperCard({
   setErr: (s: string | null) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [listOpen, setListOpen] = useState(true);
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    return localStorage.getItem(`supercard.aa.collapsed.${subId}`) === "1";
+  });
+  const [authors, setAuthors] = useState<any[]>([]);
+  const [provenance, setProvenance] = useState<Record<string, any>>({});
 
-  // Read current state from the rubric
-  const fAuthors = card.fields.find((f) => f.key === "authors_any");
-  const fAffils  = card.fields.find((f) => f.key === "affiliations_listed");
-  const fNames   = card.fields.find((f) => f.key === "full_author_names");
-  const fROR     = card.fields.find((f) => f.key === "ror_for_all_affiliations");
+  function toggleCollapsed() {
+    setCollapsed((v) => {
+      const n = !v;
+      localStorage.setItem(`supercard.aa.collapsed.${subId}`, n ? "1" : "0");
+      return n;
+    });
+  }
 
-  if (!fAuthors || !fAffils) return null;
+  useEffect(() => {
+    (async () => {
+      try {
+        const m = await getMetadata(subId);
+        setAuthors(m.authors || []);
+        setProvenance(m.provenance || {});
+      } catch (e) {
+        setAuthors([]);
+      }
+    })();
+  }, [subId, card]);
 
-  const authorsState = deriveState(fAuthors);
-  const affilsState  = deriveState(fAffils);
-  const allDone = authorsState === "confirmed" && affilsState === "confirmed";
+  // Read current state for every rubric field this supercard owns
+  const ownedFields: { key: string; tier: string; label: string; field: FieldScore | undefined; state: CardState }[] = [
+    "authors_any", "full_author_names", "affiliations_listed",
+    "orcid_for_corresponding", "orcid_for_all_authors", "ror_for_all_affiliations",
+  ].map((k) => {
+    const f = card.fields.find((x) => x.key === k);
+    return { key: k, tier: f?.tier ?? "", label: f?.label ?? k, field: f, state: f ? deriveState(f) : "missing" };
+  });
+
+  if (!ownedFields[0].field) return null;
+
+  const stateGlyph: Record<CardState, string> = {
+    confirmed: "✓", pending: "?", needs_pick: "⚖",
+    needs_locate: "✗", missing: "○", manual: "✎",
+  };
+  const stateColor: Record<CardState, string> = {
+    confirmed: "var(--ok)", pending: "var(--warn)", needs_pick: "var(--info)",
+    needs_locate: "var(--error)", missing: "var(--fg-tertiary)", manual: "var(--info)",
+  };
+
+  const presentCount = ownedFields.filter((o) => o.field?.status === "present").length;
+
+  // Derive the current stage from the actual data — drives which CTA shows.
+  const haveAuthors = authors.length > 0;
+  const haveAnyOrcid = authors.some((a) => a.orcid);
+  const haveAnyROR = authors.some((a) => (a.ror_ids || []).some((r: any) => r));
+  const allHaveOrcid = haveAuthors && authors.every((a) => a.orcid);
+  const allAffsHaveROR = haveAuthors && authors.every((a) => {
+    const affs = a.affiliations || [];
+    if (affs.length === 0) return true;
+    const rors = a.ror_ids || [];
+    return affs.every((_: string, i: number) => rors[i]);
+  });
+
+  let stage: SupercardStage;
+  if (!haveAuthors) stage = "locate";
+  else if (!haveAnyOrcid && !haveAnyROR) stage = "enrich";
+  else if (!allHaveOrcid || !allAffsHaveROR) stage = "verify";
+  else stage = "done";
+
+  async function fetchOrcidsAndRors() {
+    setBusy("Fetching ORCIDs and RORs (free)…");
+    setErr(null);
+    try {
+      await autofix(subId, "resolve_orcids");
+      await autofix(subId, "resolve_rors");
+      await onUpdate();
+      showToast("ORCID + ROR sweeps complete (free)");
+    } catch (e) { setErr(String(e)); }
+    finally { setBusy(null); }
+  }
+
+  async function verifyWithAI() {
+    setBusy("Verifying authors with AI…");
+    setErr(null);
+    try {
+      const r = await fetch(`${(import.meta.env.VITE_API_BASE_URL as string) || "http://localhost:8000"}/submissions/${subId}/structure/verify_authors`, { method: "POST" });
+      if (!r.ok) throw new Error(`verify failed: ${r.status} ${await r.text()}`);
+      await onUpdate();
+      showToast("AI verification complete · check the evidence chains");
+    } catch (e) { setErr(String(e)); }
+    finally { setBusy(null); }
+  }
 
   return (
-    <div className="card supercard">
-      <div className="row">
-        <div>
-          <h2 className="card-title" style={{ margin: 0 }}>
-            ✨ Authors &amp; Affiliations workspace
-          </h2>
-          <p className="muted small" style={{ margin: "4px 0 0" }}>
-            One linked interaction for both — authors and affiliations are tied
-            via superscript markers, so we structure them together.
-          </p>
+    <div className={`card supercard ${collapsed ? "supercard-collapsed" : ""}`}>
+      <div className="row supercard-header" onClick={toggleCollapsed} style={{ cursor: "pointer" }}>
+        <div className="cluster" style={{ alignItems: "baseline" }}>
+          <span className="muted">{collapsed ? "›" : "⌄"}</span>
+          <h2 className="card-title" style={{ margin: 0 }}>Authors and affiliations</h2>
         </div>
-        <span className="mono small">
-          {allDone ? "✓ both confirmed" : "needs your eyes"}
+        <span className="mono small" style={{ color: presentCount === ownedFields.length ? "var(--ok)" : "var(--fg-tertiary)" }}>
+          {presentCount}/{ownedFields.length} fields · {stage}
         </span>
       </div>
 
-      <div className="supercard-stats">
-        <div className="supercard-stat">
-          <div className="muted small">Authors</div>
-          <div className="supercard-stat-val">{fAuthors.value_preview ?? "—"}</div>
-        </div>
-        <div className="supercard-stat">
-          <div className="muted small">Affiliations</div>
-          <div className="supercard-stat-val">{fAffils.value_preview ?? "—"}</div>
-        </div>
-        {fNames && (
-          <div className="supercard-stat">
-            <div className="muted small">Given+surname split</div>
-            <div className="supercard-stat-val">{fNames.value_preview ?? "—"}</div>
-          </div>
-        )}
-        {fROR && (
-          <div className="supercard-stat">
-            <div className="muted small">ROR coverage</div>
-            <div className="supercard-stat-val">{fROR.value_preview ?? "—"}</div>
-          </div>
-        )}
-      </div>
+      {!collapsed && (
+        <>
+          <p className="muted small" style={{ margin: "6px 0 0" }}>
+            Linked via superscript markers — extracted, looked up, and verified together.
+            Covers {ownedFields.length} rubric fields across T0–T2.
+          </p>
 
-      <div className="actions">
-        <button className="primary" onClick={() => setOpen((v) => !v)} disabled={busy}>
-          {open ? "Close" : "📍 Locate authors + affiliations together"}
-        </button>
-      </div>
+          <div className="supercard-checklist">
+            {ownedFields.map((o) => (
+              <div key={o.key} className="supercard-check-row" title={o.field?.why || ""}>
+                <span style={{ color: stateColor[o.state] }}>{stateGlyph[o.state]}</span>
+                <span className="check-tier mono">{o.tier}</span>
+                <span className="check-label">{o.label}</span>
+                <span className="check-preview muted">{o.field?.value_preview ?? "—"}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="actions supercard-actions">
+            {stage === "locate" && (
+              <button className="primary" onClick={() => setOpen((v) => !v)} disabled={busy}>
+                {open ? "Close" : "Identify on document"}
+              </button>
+            )}
+
+            {stage === "enrich" && (
+              <>
+                <button className="primary" onClick={fetchOrcidsAndRors} disabled={busy}>
+                  Run lookups<span className="btn-meta">ORCID · ROR · free</span>
+                </button>
+                <button onClick={verifyWithAI} disabled={busy}>
+                  Cross-source verify<span className="btn-meta">AI · ~$0.011</span>
+                </button>
+                <button className="ghost" onClick={() => setOpen((v) => !v)} disabled={busy}>
+                  {open ? "Close" : "Re-identify"}
+                </button>
+              </>
+            )}
+
+            {stage === "verify" && (
+              <>
+                <button className="primary" onClick={verifyWithAI} disabled={busy}>
+                  Cross-source verify<span className="btn-meta">AI · ~$0.011</span>
+                </button>
+                <button onClick={fetchOrcidsAndRors} disabled={busy}>
+                  Re-run lookups
+                </button>
+                <button className="ghost" onClick={() => setOpen((v) => !v)} disabled={busy}>
+                  {open ? "Close" : "Re-identify"}
+                </button>
+              </>
+            )}
+
+            {stage === "done" && (
+              <>
+                <span className="status status-ready">complete</span>
+                <button className="ghost" onClick={verifyWithAI} disabled={busy}>
+                  Re-verify
+                </button>
+                <button className="ghost" onClick={() => setOpen((v) => !v)} disabled={busy}>
+                  {open ? "Close" : "Re-identify"}
+                </button>
+              </>
+            )}
+          </div>
 
       {open && (
         <AuthorsAffiliationsLocate
@@ -718,6 +845,78 @@ function AuthorsAffiliationsSuperCard({
             }
           }}
         />
+      )}
+
+      {!collapsed && authors.length > 0 && (
+        <div className="authors-list">
+          <button
+            className="ghost authors-list-toggle"
+            onClick={() => setListOpen((v) => !v)}
+            aria-expanded={listOpen}
+          >
+            <span>{listOpen ? "▾" : "▸"}</span>
+            <strong>{authors.length} extracted authors</strong>
+            <span className="muted small">
+              · {authors.filter((a) => a.orcid).length}/{authors.length} ORCID
+              · {authors.filter((a) => (a.ror_ids || []).some((r: any) => r)).length}/{authors.length} have ROR
+            </span>
+          </button>
+          {listOpen && (
+            <ol className="author-rows">
+              {authors.map((a: any, i: number) => {
+                const prov = provenance[`authors[${i}]`] || {};
+                const evidence: string[] = prov.evidence_chain || [];
+                return (
+                  <li key={i} className="author-row">
+                    <div className="author-main">
+                      <span className="author-name">
+                        {a.full_name || `${a.given_name || ""} ${a.surname || ""}`.trim() || "(unnamed)"}
+                      </span>
+                      {a.is_corresponding && <span className="chip chip-warn">corresponding</span>}
+                      {a.orcid ? (
+                        <a className="chip chip-orcid" href={`https://orcid.org/${a.orcid}`} target="_blank" rel="noreferrer">
+                          ORCID {a.orcid}
+                        </a>
+                      ) : (
+                        <span className="chip chip-missing">no ORCID</span>
+                      )}
+                      {a.email && <span className="muted small mono">{a.email}</span>}
+                    </div>
+                    {(a.affiliations && a.affiliations.length > 0) ? (
+                      <ul className="aff-rows">
+                        {a.affiliations.map((aff: string, j: number) => {
+                          const ror = (a.ror_ids || [])[j];
+                          return (
+                            <li key={j} className="aff-row">
+                              <span className="aff-text">{aff}</span>
+                              {ror ? (
+                                <a className="chip chip-ror" href={ror} target="_blank" rel="noreferrer">
+                                  {ror.replace("https://ror.org/", "ROR ")}
+                                </a>
+                              ) : (
+                                <span className="chip chip-missing">no ROR</span>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : (
+                      <p className="muted small" style={{ marginLeft: 26 }}>no affiliations attached</p>
+                    )}
+                    {evidence.length > 0 && (
+                      <details className="author-evidence">
+                        <summary className="muted small">why this match? · confidence {Math.round((prov.confidence ?? 0) * 100)}%</summary>
+                        <ul>{evidence.map((e, k) => <li key={k} className="small">{e}</li>)}</ul>
+                      </details>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </div>
+      )}
+        </>
       )}
     </div>
   );
@@ -841,7 +1040,7 @@ function AuthorsAffiliationsLocate({
         <button className="ghost" onClick={() => { setAuthorIds(new Set()); setAffilIds(new Set()); }}>Clear all</button>
         <button className="ghost" onClick={onCancel}>Cancel</button>
         <button className="primary" onClick={save} disabled={submitting || (authorIds.size === 0 && affilIds.size === 0)}>
-          {submitting ? "Structuring…" : "✨ Extract linked authors  (~$0.0006)"}
+          {submitting ? "Structuring…" : "Extract linked authors  (~$0.0006)"}
         </button>
       </div>
 
@@ -891,13 +1090,12 @@ function AuthorsAffiliationsLocate({
 
 function LeverageBadge({ leverage }: { leverage: "deterministic" | "api" | "ai" }) {
   const cfg = {
-    deterministic: { icon: "📐", label: "free", title: "Deterministic — regex / Docling, no LLM needed" },
-    api:           { icon: "🔍", label: "api",  title: "Free enricher API lookup; LLM only for ambiguous picks" },
-    ai:            { icon: "✨", label: "AI",   title: "AI enrichment recommended — LLM is a step-change here" },
+    deterministic: { label: "free",     title: "Deterministic — regex / Docling, no LLM needed" },
+    api:           { label: "lookup",   title: "Free enricher API lookup; LLM only for ambiguous picks" },
+    ai:            { label: "ai",       title: "AI enrichment recommended — LLM is a step-change here" },
   }[leverage];
   return (
     <span className={`leverage-badge leverage-${leverage}`} title={cfg.title}>
-      <span aria-hidden>{cfg.icon}</span>
       {cfg.label}
     </span>
   );
