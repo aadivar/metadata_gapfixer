@@ -32,7 +32,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .enrichers import CrossrefClient, OpenAlexClient
+from .enrichers import CrossrefClient, OpenAlexClient, ORCIDClient, RORClient
 from .factsheet import Factsheet
 from .llm_router import LLMRouter, router_for_submission
 
@@ -561,6 +561,226 @@ def structure_credit(meta: dict, fs: Factsheet, docling_doc: dict, *,
 
 
 # ============================================================================
+# 5. verify_authors — multi-source author + affiliation verification
+# ============================================================================
+
+class VerifiedAffiliation(BaseModel):
+    string: str
+    verified_ror: str | None = None
+    verified_ror_name: str | None = None
+
+
+class RejectedAlternative(BaseModel):
+    id: str
+    reason: str
+
+
+class VerifiedAuthor(BaseModel):
+    author_name: str
+    verified_orcid: str | None = None
+    openalex_id: str | None = None
+    verified_affiliations: list[VerifiedAffiliation] = Field(default_factory=list)
+    evidence_chain: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    alternatives_rejected: list[RejectedAlternative] = Field(default_factory=list)
+
+
+_VERIFY_SYSTEM = """You are a scholarly author verification assistant.
+
+You will receive an author's name + affiliation(s) as they appear in a
+published paper, AND a dossier of candidate matches from THREE authoritative
+sources:
+  - ORCID (with each candidate's employment / education history)
+  - OpenAlex (with each candidate's work count, top institutions, country)
+  - ROR (with each candidate's preferred display name, country, type)
+
+Cross-check across all three sources. Return a verified_orcid, an openalex_id,
+a verified_ror per affiliation, an evidence_chain (2-4 short factual statements
+citing what aligned), and a confidence in [0,1].
+
+Confidence rules:
+- ≥ 0.9 requires evidence from at least 2 of the 3 sources (ORCID employment,
+  OpenAlex affiliation, ROR display-name match).
+- 0.7–0.9: one source matches strongly; another is plausible.
+- < 0.7: leave verified_orcid null; list candidates in alternatives_rejected
+  with concrete reasons.
+
+Hard rules:
+- NEVER invent ORCIDs or RORs that are not in the candidate lists provided.
+- If a candidate's field of work is clearly different from the paper's domain
+  (e.g. computer science profile vs a chemistry paper), reject it with that
+  reason.
+- evidence_chain entries are SHORT factual lines, not generic praise."""
+
+
+def _author_initials(full_name: str) -> str:
+    return "".join(w[0].upper() for w in (full_name or "").split() if w and w[0].isalpha())
+
+
+def _orcid_candidate_dossier(orcid_client: ORCIDClient, given: str | None,
+                             family: str | None, affil: str | None,
+                             max_with_record: int = 2) -> list[dict]:
+    """Search ORCID by name; for the top few candidates, also fetch their full
+    record so the LLM has employment history to reason against."""
+    if not family:
+        return []
+    candidates = orcid_client.search(given_name=given, family_name=family,
+                                     affiliation=affil)[:5]
+    out: list[dict] = []
+    for i, c in enumerate(candidates):
+        orcid_id = c.get("orcid")
+        if not orcid_id:
+            continue
+        rec = orcid_client.record(orcid_id) if i < max_with_record else None
+        employment = []
+        if isinstance(rec, dict):
+            try:
+                # ORCID public API: activities-summary.employments.affiliation-group[*]
+                af = (rec.get("activities-summary") or {}).get("employments") or {}
+                groups = af.get("affiliation-group") or []
+                for g in groups:
+                    summaries = g.get("summaries") or []
+                    for s in summaries:
+                        emp = s.get("employment-summary") or {}
+                        org = emp.get("organization") or {}
+                        start = (emp.get("start-date") or {}).get("year", {}).get("value")
+                        end = (emp.get("end-date") or {}).get("year", {}).get("value")
+                        employment.append({
+                            "organization": org.get("name"),
+                            "department": emp.get("department-name"),
+                            "role": emp.get("role-title"),
+                            "start_year": start,
+                            "end_year": end,
+                        })
+            except Exception:
+                employment = []
+        out.append({"orcid": orcid_id, "employment": employment[:8]})
+    return out
+
+
+def _openalex_author_dossier(oa_client: OpenAlexClient, full_name: str,
+                             affil: str | None) -> list[dict]:
+    return oa_client.search_author(full_name, affil)[:5]
+
+
+def _ror_dossier(ror_client: RORClient, affil: str) -> list[dict]:
+    return ror_client.search(affil)[:5]
+
+
+def verify_authors(meta: dict, fs: Factsheet, docling_doc: dict, *,
+                   sub_id: int | None = None) -> dict:
+    """Per-author multi-source verification (ORCID + OpenAlex + ROR). Updates
+    meta['authors'][i].orcid and meta['authors'][i].ror_ids with cited evidence."""
+    authors = meta.get("authors") or []
+    if not authors:
+        # Bootstrap from factsheet if metadata authors is empty
+        for a in fs.authors:
+            authors.append({
+                "given_name": a.given,
+                "surname": a.surname,
+                "full_name": a.name,
+                "orcid": a.orcid,
+                "is_corresponding": a.is_corresponding,
+                "email": a.email,
+                "affiliations": [fs.affiliations[m] for m in a.markers if m in fs.affiliations],
+                "ror_ids": [],
+            })
+        meta["authors"] = authors
+    if not authors:
+        return {"ok": False, "error": "no authors to verify"}
+
+    orcid = ORCIDClient()
+    oa = OpenAlexClient()
+    ror = RORClient()
+    router = router_for_submission(sub_id) if sub_id is not None else LLMRouter()
+
+    # Cache ROR results per unique affiliation string
+    ror_cache: dict[str, list[dict]] = {}
+
+    verified_count = 0
+    needs_review = 0
+    for i, a in enumerate(authors):
+        full = a.get("full_name") or f"{a.get('given_name') or ''} {a.get('surname') or ''}".strip()
+        family = a.get("surname")
+        given = a.get("given_name")
+        affils = a.get("affiliations") or []
+        primary_affil = affils[0] if affils else None
+
+        # Pre-fetch candidate dossiers (free APIs)
+        orcid_dossier = _orcid_candidate_dossier(orcid, given, family, primary_affil)
+        oa_dossier = _openalex_author_dossier(oa, full, primary_affil)
+        ror_dossiers: dict[str, list[dict]] = {}
+        for affil in affils:
+            if affil not in ror_cache:
+                ror_cache[affil] = _ror_dossier(ror, affil)
+            ror_dossiers[affil] = ror_cache[affil]
+
+        if not orcid_dossier and not oa_dossier and not any(ror_dossiers.values()):
+            meta.setdefault("provenance", {})[f"authors[{i}]"] = {
+                "source": "no_candidates", "confidence": 0.0,
+                "reasoning": "No ORCID / OpenAlex / ROR candidates returned.",
+            }
+            continue
+
+        # Single LLM call per author
+        user_payload = json.dumps({
+            "author": {"name": full, "given": given, "family": family,
+                       "affiliations": affils, "is_corresponding": a.get("is_corresponding")},
+            "orcid_candidates": orcid_dossier,
+            "openalex_candidates": oa_dossier,
+            "ror_candidates_per_affiliation": ror_dossiers,
+        }, ensure_ascii=False)
+
+        result = router.call(
+            task="verify_authors",
+            system=_VERIFY_SYSTEM,
+            user=user_payload,
+            schema=VerifiedAuthor,
+            strict=False,
+        )
+
+        # Apply to metadata
+        if result.verified_orcid and result.confidence >= 0.7:
+            a["orcid"] = result.verified_orcid
+            verified_count += 1
+        elif result.confidence < 0.7:
+            needs_review += 1
+        # ROR per affiliation
+        ror_ids: list[str | None] = []
+        for affil in affils:
+            match = next((va for va in result.verified_affiliations
+                          if (va.string or "").strip() == affil.strip()), None)
+            ror_ids.append(match.verified_ror if (match and match.verified_ror) else None)
+        a["ror_ids"] = ror_ids
+
+        # Provenance for the author block
+        prov = meta.setdefault("provenance", {})
+        prov[f"authors[{i}]"] = {
+            "source": "llm_verified",
+            "confidence": result.confidence,
+            "confirmed": False,
+            "reasoning": " · ".join(result.evidence_chain) if result.evidence_chain else "Verified across ORCID + OpenAlex + ROR.",
+            "evidence_chain": result.evidence_chain,
+            "openalex_id": result.openalex_id,
+            "alternatives_rejected": [alt.model_dump() for alt in result.alternatives_rejected],
+            "task": "verify_authors",
+        }
+        if result.verified_orcid:
+            prov[f"authors[{i}].orcid"] = {
+                "source": "llm_verified",
+                "confidence": result.confidence,
+                "reasoning": " · ".join(result.evidence_chain),
+            }
+
+    return {
+        "ok": True, "task": "verify_authors",
+        "authors_total": len(authors),
+        "verified": verified_count,
+        "needs_review": needs_review,
+    }
+
+
+# ============================================================================
 # Cost estimation
 # ============================================================================
 
@@ -568,9 +788,10 @@ def structure_credit(meta: dict, fs: Factsheet, docling_doc: dict, *,
 _TASK_TOKEN_ESTIMATES: dict[str, tuple[int, int, int]] = {
     # task: (avg_in_per_call, avg_out_per_call, calls_per_paper)
     "structure_authors":    (1_500,   500, 1),
-    "structure_references": (3_500, 2_000, 5),  # 5 batches of 10 refs
+    "structure_references": (3_500, 2_000, 5),
     "structure_funding":    (1_000,   400, 1),
     "structure_credit":     (1_500,   500, 1),
+    "verify_authors":       (3_000,   800, 11),  # one call per author; assume ~11
 }
 
 _PRICE_MINI = (0.15 / 1_000_000, 0.60 / 1_000_000)  # (input, output) USD/token
@@ -605,6 +826,7 @@ STRUCTURERS = {
     "structure_references": structure_references,
     "structure_funding":    structure_funding,
     "structure_credit":     structure_credit,
+    "verify_authors":       verify_authors,
 }
 
 

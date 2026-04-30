@@ -21,6 +21,7 @@ from .factsheet import Factsheet
 Tier = Literal["T0", "T1", "T2", "T3"]
 Bucket = Literal["high", "medium", "manual"]
 Status = Literal["present", "missing"]
+Leverage = Literal["deterministic", "api", "ai"]
 
 
 class FieldDef(BaseModel):
@@ -31,6 +32,15 @@ class FieldDef(BaseModel):
     bucket: Bucket       # how to fix when missing
     autofix_action: str | None = None  # name of an /autofix endpoint, if any
     why: str             # one-line "what does this enable?" — shown as hover/help
+    # LLM leverage signal: where does this field's value most usefully come from?
+    #   "deterministic" → regex / Docling / PDF metadata; LLM adds nothing
+    #   "api"           → free enricher API lookup; LLM only useful for ambiguous picks
+    #   "ai"            → LLM is a step-change (prose synthesis, multi-source verification,
+    #                     mapping free text → closed taxonomy)
+    llm_leverage: Leverage = "deterministic"
+    # Indicative cost (USD) per gap when llm_leverage="ai" — used by the
+    # GUI to show "~$0.0NN to enrich all AI gaps in this tier" estimates.
+    ai_cost_estimate: float = 0.0
 
 
 # ============================================================================
@@ -39,38 +49,39 @@ class FieldDef(BaseModel):
 
 RUBRIC: list[FieldDef] = [
     # ─── T0 Depositable ─────────────────────────────────────────────────────
-    FieldDef(key="doi",            label="DOI",                tier="T0", weight=10, bucket="high",   autofix_action="from_factsheet", why="Without a DOI you cannot deposit."),
-    FieldDef(key="title",          label="Article title",      tier="T0", weight=10, bucket="high",   autofix_action="from_docling_title", why="Mandatory in Crossref schema."),
-    FieldDef(key="journal_title",  label="Journal title",      tier="T0", weight=8,  bucket="manual", why="From publisher profile or Crossref-by-ISSN lookup."),
-    FieldDef(key="issn",           label="ISSN",               tier="T0", weight=8,  bucket="high",   autofix_action="from_factsheet", why="Identifies the journal."),
-    FieldDef(key="publication_year", label="Publication year", tier="T0", weight=7,  bucket="high",   autofix_action="from_factsheet", why="Required for citation."),
-    FieldDef(key="authors_any",    label="At least one author", tier="T0", weight=7, bucket="high",   autofix_action="from_factsheet", why="Required."),
+    FieldDef(key="doi",            label="DOI",                tier="T0", weight=10, bucket="high",   autofix_action="from_factsheet",     llm_leverage="deterministic", why="Without a DOI you cannot deposit."),
+    FieldDef(key="title",          label="Article title",      tier="T0", weight=10, bucket="high",   autofix_action="from_docling_title", llm_leverage="deterministic", why="Mandatory in Crossref schema."),
+    FieldDef(key="journal_title",  label="Journal title",      tier="T0", weight=8,  bucket="manual",                                       llm_leverage="api",           why="From publisher profile or Crossref-by-ISSN lookup."),
+    FieldDef(key="issn",           label="ISSN",               tier="T0", weight=8,  bucket="high",   autofix_action="from_factsheet",     llm_leverage="deterministic", why="Identifies the journal."),
+    FieldDef(key="publication_year", label="Publication year", tier="T0", weight=7,  bucket="high",   autofix_action="from_factsheet",     llm_leverage="api",           why="Required for citation."),
+    FieldDef(key="authors_any",    label="At least one author", tier="T0", weight=7, bucket="high",   autofix_action="from_factsheet",     llm_leverage="ai", ai_cost_estimate=0.0006, why="Required. AI cleans up superscript-marker linking when deterministic fails."),
 
     # ─── T1 Discoverable ────────────────────────────────────────────────────
-    FieldDef(key="abstract",       label="Abstract",           tier="T1", weight=8,  bucket="high",   autofix_action="from_docling_abstract", why="Indexers and discovery layers rely on it."),
-    FieldDef(key="full_author_names", label="Full author names (not initials)", tier="T1", weight=6, bucket="high", autofix_action="from_factsheet", why="Helps disambiguate authors."),
-    FieldDef(key="publication_date_full", label="Precise pub date (Y/M/D)", tier="T1", weight=5, bucket="medium", autofix_action="crossref_by_doi", why="Required for ranking and timeliness."),
-    FieldDef(key="volume_issue_pages", label="Volume / issue / pages", tier="T1", weight=5, bucket="medium", autofix_action="crossref_by_doi", why="Standard citation completeness."),
-    FieldDef(key="license_url",    label="License URL",        tier="T1", weight=6,  bucket="high",   autofix_action="from_factsheet", why="Defines reuse permissions."),
-    FieldDef(key="references_any", label="References (any form)", tier="T1", weight=6, bucket="high", autofix_action="from_docling_refs", why="Discoverability and citation graph."),
+    FieldDef(key="abstract",       label="Abstract",           tier="T1", weight=8,  bucket="high",   autofix_action="from_docling_abstract", llm_leverage="deterministic", why="Indexers and discovery layers rely on it."),
+    FieldDef(key="full_author_names", label="Full author names (not initials)", tier="T1", weight=6, bucket="high", autofix_action="from_factsheet", llm_leverage="ai", ai_cost_estimate=0.0006, why="AI splits given/surname and resolves messy formatting."),
+    FieldDef(key="publication_date_full", label="Precise pub date (Y/M/D)", tier="T1", weight=5, bucket="medium", autofix_action="crossref_by_doi", llm_leverage="api", why="Crossref-by-DOI lookup."),
+    FieldDef(key="volume_issue_pages", label="Volume / issue / pages", tier="T1", weight=5, bucket="medium", autofix_action="crossref_by_doi", llm_leverage="api", why="Crossref-by-DOI lookup."),
+    FieldDef(key="license_url",    label="License URL",        tier="T1", weight=6,  bucket="high",   autofix_action="from_factsheet",       llm_leverage="deterministic", why="Defines reuse permissions."),
+    FieldDef(key="references_any", label="References (any form)", tier="T1", weight=6, bucket="high", autofix_action="from_docling_refs",    llm_leverage="deterministic", why="Discoverability and citation graph."),
 
     # ─── T2 Linkable ────────────────────────────────────────────────────────
-    FieldDef(key="orcid_for_corresponding", label="ORCID for corresponding author", tier="T2", weight=8, bucket="high", autofix_action="resolve_orcids", why="Connects this paper to the author's profile."),
-    FieldDef(key="orcid_for_all_authors", label="ORCID for every author", tier="T2", weight=7, bucket="high", autofix_action="resolve_orcids", why="Full author disambiguation across the literature."),
-    FieldDef(key="ror_for_all_affiliations", label="ROR for every affiliation", tier="T2", weight=7, bucket="high", autofix_action="resolve_rors", why="Connects affiliations to a global registry."),
-    FieldDef(key="references_with_doi", label="References with DOIs", tier="T2", weight=8, bucket="high", autofix_action="resolve_references", why="Builds the citation graph at deposit time."),
-    FieldDef(key="funder_doi",     label="Funder Registry DOI",  tier="T2", weight=6, bucket="high", autofix_action="resolve_funders", why="Connects funded research to the funder."),
-    FieldDef(key="award_numbers",  label="Award / grant numbers", tier="T2", weight=5, bucket="high", autofix_action="from_factsheet", why="Funder reporting and impact attribution."),
-    FieldDef(key="abstract_jats",  label="JATS-formatted abstract", tier="T2", weight=4, bucket="medium", why="Structured abstract enables better indexing."),
-    FieldDef(key="oa_indicator",   label="Open-access indicator", tier="T2", weight=5, bucket="high", autofix_action="from_license", why="Signals open availability."),
+    FieldDef(key="orcid_for_corresponding", label="ORCID for corresponding author", tier="T2", weight=8, bucket="high", autofix_action="resolve_orcids", llm_leverage="ai", ai_cost_estimate=0.001, why="Verified by AI across ORCID + OpenAlex + ROR."),
+    FieldDef(key="orcid_for_all_authors", label="ORCID for every author", tier="T2", weight=7, bucket="high", autofix_action="resolve_orcids", llm_leverage="ai", ai_cost_estimate=0.011, why="Full author disambiguation across ORCID + OpenAlex + ROR with cited evidence."),
+    FieldDef(key="ror_for_all_affiliations", label="ROR for every affiliation", tier="T2", weight=7, bucket="high", autofix_action="resolve_rors", llm_leverage="ai", ai_cost_estimate=0.0, why="Resolved as part of the per-author verification (no extra cost)."),
+    FieldDef(key="references_with_doi", label="References with DOIs", tier="T2", weight=8, bucket="high", autofix_action="resolve_references", llm_leverage="ai", ai_cost_estimate=0.009, why="LLM picks the right Crossref candidate per citation with match evidence."),
+    FieldDef(key="funder_doi",     label="Funder Registry DOI",  tier="T2", weight=6, bucket="high", autofix_action="resolve_funders", llm_leverage="api", why="OpenAlex funder lookup; AI only when 2+ candidates match."),
+    FieldDef(key="award_numbers",  label="Award / grant numbers", tier="T2", weight=5, bucket="high", autofix_action="from_factsheet", llm_leverage="ai", ai_cost_estimate=0.0003, why="AI links grant numbers to specific funders + authors."),
+    FieldDef(key="abstract_jats",  label="JATS-formatted abstract", tier="T2", weight=4, bucket="medium", llm_leverage="ai", ai_cost_estimate=0.0005, why="Structured JATS markup needs the LLM."),
+    FieldDef(key="oa_indicator",   label="Open-access indicator", tier="T2", weight=5, bucket="high", autofix_action="from_license", llm_leverage="deterministic", why="Derived from license URL."),
 
     # ─── T3 Integrity-grade ─────────────────────────────────────────────────
-    FieldDef(key="preprint_relation", label="Preprint → version-of-record link", tier="T3", weight=8, bucket="medium", autofix_action="detect_preprint", why="Critical for integrity — links the published paper to its open preprint."),
-    FieldDef(key="crossmark_policy", label="Crossmark policy URL", tier="T3", weight=4, bucket="manual", why="Enables update / retraction tracking."),
-    FieldDef(key="plain_language_summary", label="Plain-language summary", tier="T3", weight=4, bucket="medium", why="Public-facing accessibility."),
-    FieldDef(key="conflict_of_interest", label="Conflict-of-interest statement", tier="T3", weight=5, bucket="high", autofix_action="from_factsheet", why="Required by many publishers, surfaces declared interests."),
-    FieldDef(key="data_availability", label="Data availability statement", tier="T3", weight=5, bucket="high", autofix_action="from_factsheet", why="Reproducibility signal."),
-    FieldDef(key="copyright_holder", label="Copyright holder", tier="T3", weight=3, bucket="manual", why="Publisher policy field."),
+    FieldDef(key="preprint_relation", label="Preprint → version-of-record link", tier="T3", weight=8, bucket="medium", autofix_action="detect_preprint", llm_leverage="deterministic", why="bioRxiv / medRxiv DOI pattern detection."),
+    FieldDef(key="crossmark_policy", label="Crossmark policy URL", tier="T3", weight=4, bucket="manual", llm_leverage="deterministic", why="Pure publisher policy — your input."),
+    FieldDef(key="plain_language_summary", label="Plain-language summary", tier="T3", weight=4, bucket="medium", llm_leverage="ai", ai_cost_estimate=0.0005, why="Locating + extracting from prose if not labeled."),
+    FieldDef(key="conflict_of_interest", label="Conflict-of-interest statement", tier="T3", weight=5, bucket="high", autofix_action="from_factsheet", llm_leverage="deterministic", why="Boilerplate-anchor extraction."),
+    FieldDef(key="data_availability", label="Data availability statement", tier="T3", weight=5, bucket="high", autofix_action="from_factsheet", llm_leverage="deterministic", why="Boilerplate-anchor extraction."),
+    FieldDef(key="copyright_holder", label="Copyright holder", tier="T3", weight=3, bucket="manual", llm_leverage="deterministic", why="Publisher policy — your input."),
+    FieldDef(key="credit_roles", label="CRediT contributor roles", tier="T3", weight=6, bucket="high", llm_leverage="ai", ai_cost_estimate=0.0005, why="LLM maps free-text contributions onto the 14-role CRediT taxonomy."),
 ]
 
 
@@ -92,6 +103,23 @@ class FieldScore(BaseModel):
     value_preview: str | None = None
     autofix_action: str | None = None
     why: str
+    llm_leverage: Leverage = "deterministic"
+    ai_cost_estimate: float = 0.0
+    # Provenance for present fields (so the GUI can render confirmed vs pending state)
+    provenance_source: str | None = None
+    provenance_confidence: float | None = None
+    provenance_confirmed: bool = False
+    provenance_reasoning: str | None = None
+    # Map from the field-key to its actual metadata path(s) so the GUI can call
+    # /confirm, /reject, /pick on the right path.
+    metadata_paths: list[str] = []
+
+
+class TierBreakdown(BaseModel):
+    deterministic: int = 0
+    api: int = 0
+    ai: int = 0
+    ai_cost_estimate_usd: float = 0.0   # to enrich all unresolved AI gaps in this tier
 
 
 class TierScore(BaseModel):
@@ -100,6 +128,7 @@ class TierScore(BaseModel):
     score: int                # 0..100
     fields_present: int
     fields_total: int
+    breakdown: TierBreakdown = TierBreakdown()
 
 
 class Scorecard(BaseModel):
@@ -111,6 +140,7 @@ class Scorecard(BaseModel):
     medium: list[FieldScore]
     manual: list[FieldScore]
     facts_summary: dict[str, Any]
+    estimated_full_enrichment_usd: float = 0.0   # cost to resolve every remaining AI gap
 
 
 TIER_LABELS = {
@@ -242,17 +272,54 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
     return (False, None)
 
 
+_FIELD_KEY_TO_PATHS: dict[str, list[str]] = {
+    "doi": ["doi"],
+    "title": ["title"],
+    "journal_title": ["journal_title"],
+    "issn": ["issn_electronic", "issn_print"],
+    "publication_year": ["publication_date"],
+    "abstract": ["abstract"],
+    "publication_date_full": ["publication_date"],
+    "volume_issue_pages": ["volume", "issue", "first_page"],
+    "license_url": ["license_url"],
+    "preprint_relation": ["preprint_doi"],
+    "oa_indicator": ["is_open_access"],
+    "conflict_of_interest": ["conflict_of_interest"],
+    "data_availability": ["data_availability"],
+    "crossmark_policy": ["crossmark_policy_url"],
+    "plain_language_summary": ["plain_language_summary"],
+    "copyright_holder": ["copyright_holder"],
+}
+
+
 def score(factsheet: Factsheet, metadata: dict | None = None) -> Scorecard:
     """Compute a scorecard from a factsheet (and optionally a saved metadata dict)."""
     fields_out: list[FieldScore] = []
-    tier_buckets: dict[Tier, dict[str, int]] = {t: {"present_w": 0, "total_w": 0, "n_present": 0, "n_total": 0} for t in TIER_WEIGHTS}
+    tier_buckets: dict[Tier, dict[str, Any]] = {t: {
+        "present_w": 0, "total_w": 0, "n_present": 0, "n_total": 0,
+        "det": 0, "api": 0, "ai": 0, "ai_cost": 0.0,
+    } for t in TIER_WEIGHTS}
+    prov = (metadata or {}).get("provenance") or {}
+    total_ai_cost = 0.0
 
     for fd in RUBRIC:
         present, preview = _present(fd.key, factsheet, metadata)
+        paths = _FIELD_KEY_TO_PATHS.get(fd.key, [])
+        prov_entry: dict = {}
+        for p in paths:
+            if p in prov:
+                prov_entry = prov[p]
+                break
         fs_field = FieldScore(
             key=fd.key, label=fd.label, tier=fd.tier, weight=fd.weight,
             bucket=fd.bucket, status="present" if present else "missing",
             value_preview=preview, autofix_action=fd.autofix_action, why=fd.why,
+            llm_leverage=fd.llm_leverage, ai_cost_estimate=fd.ai_cost_estimate,
+            provenance_source=prov_entry.get("source"),
+            provenance_confidence=prov_entry.get("confidence"),
+            provenance_confirmed=bool(prov_entry.get("confirmed")),
+            provenance_reasoning=prov_entry.get("reasoning"),
+            metadata_paths=paths,
         )
         fields_out.append(fs_field)
         tb = tier_buckets[fd.tier]
@@ -261,6 +328,14 @@ def score(factsheet: Factsheet, metadata: dict | None = None) -> Scorecard:
         if present:
             tb["present_w"] += fd.weight
             tb["n_present"] += 1
+        # Leverage breakdown
+        if fd.llm_leverage == "deterministic": tb["det"] += 1
+        elif fd.llm_leverage == "api":         tb["api"] += 1
+        elif fd.llm_leverage == "ai":
+            tb["ai"] += 1
+            if not present:  # only count cost for unresolved AI gaps
+                tb["ai_cost"] += fd.ai_cost_estimate
+                total_ai_cost += fd.ai_cost_estimate
 
     tiers: list[TierScore] = []
     composite_num = composite_den = 0
@@ -270,6 +345,10 @@ def score(factsheet: Factsheet, metadata: dict | None = None) -> Scorecard:
         tiers.append(TierScore(
             tier=t, label=TIER_LABELS[t], score=pct,
             fields_present=tb["n_present"], fields_total=tb["n_total"],
+            breakdown=TierBreakdown(
+                deterministic=tb["det"], api=tb["api"], ai=tb["ai"],
+                ai_cost_estimate_usd=round(tb["ai_cost"], 6),
+            ),
         ))
         composite_num += pct * weights
         composite_den += weights
@@ -301,6 +380,7 @@ def score(factsheet: Factsheet, metadata: dict | None = None) -> Scorecard:
         tiers=tiers, fields=fields_out,
         high_impact=high_impact, medium=medium, manual=manual,
         facts_summary=facts_summary,
+        estimated_full_enrichment_usd=round(total_ai_cost, 6),
     )
 
 

@@ -160,6 +160,8 @@ export function xmlDownloadUrl(id: number): string {
 export type Tier = "T0" | "T1" | "T2" | "T3";
 export type Bucket = "high" | "medium" | "manual";
 
+export type Leverage = "deterministic" | "api" | "ai";
+
 export type FieldScore = {
   key: string;
   label: string;
@@ -170,6 +172,20 @@ export type FieldScore = {
   value_preview?: string | null;
   autofix_action?: string | null;
   why: string;
+  llm_leverage?: Leverage;
+  ai_cost_estimate?: number;
+  provenance_source?: string | null;
+  provenance_confidence?: number | null;
+  provenance_confirmed?: boolean;
+  provenance_reasoning?: string | null;
+  metadata_paths?: string[];
+};
+
+export type TierBreakdown = {
+  deterministic: number;
+  api: number;
+  ai: number;
+  ai_cost_estimate_usd: number;
 };
 
 export type TierScore = {
@@ -178,6 +194,7 @@ export type TierScore = {
   score: number;
   fields_present: number;
   fields_total: number;
+  breakdown?: TierBreakdown;
 };
 
 export type Scorecard = {
@@ -189,7 +206,14 @@ export type Scorecard = {
   medium: FieldScore[];
   manual: FieldScore[];
   facts_summary: Record<string, any>;
+  estimated_full_enrichment_usd?: number;
 };
+
+export async function enrichAll(id: number): Promise<{ reports: any[]; score: Scorecard }> {
+  const r = await fetch(`${API}/submissions/${id}/enrich/all`, { method: "POST" });
+  if (!r.ok) throw new Error(`enrich failed: ${r.status} ${await r.text()}`);
+  return r.json();
+}
 
 export async function getScore(id: number): Promise<Scorecard> {
   const r = await fetch(`${API}/submissions/${id}/score`);
@@ -222,5 +246,43 @@ export async function getCost(id: number): Promise<{ total_usd: number; calls: a
 export async function getFactsheet(id: number): Promise<any> {
   const r = await fetch(`${API}/submissions/${id}/factsheet`);
   if (!r.ok) throw new Error(`factsheet failed: ${r.status}`);
+  return r.json();
+}
+
+export async function confirmField(id: number, fieldPath: string): Promise<{ ok: boolean; score: Scorecard }> {
+  const r = await fetch(`${API}/submissions/${id}/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ field_path: fieldPath }),
+  });
+  if (!r.ok) throw new Error(`confirm failed: ${r.status}`);
+  return r.json();
+}
+
+export async function rejectField(id: number, fieldPath: string): Promise<{ ok: boolean; score: Scorecard }> {
+  const r = await fetch(`${API}/submissions/${id}/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ field_path: fieldPath }),
+  });
+  if (!r.ok) throw new Error(`reject failed: ${r.status}`);
+  return r.json();
+}
+
+export async function locateField(
+  id: number,
+  fieldPath: string,
+  page: number,
+  boxIds: number[]
+): Promise<{ ok: boolean; value: any; score: Scorecard }> {
+  const r = await fetch(`${API}/submissions/${id}/locate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ field_path: fieldPath, page, box_ids: boxIds }),
+  });
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`locate failed: ${r.status} ${text}`);
+  }
   return r.json();
 }

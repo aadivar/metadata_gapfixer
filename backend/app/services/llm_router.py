@@ -54,6 +54,7 @@ TASK_CONFIG: dict[str, TaskConfig] = {
     "structure_references": TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=8_000, max_output_tokens=3_500),
     "structure_funding":    TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=2_500, max_output_tokens=1_200),
     "structure_credit":     TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=3_000, max_output_tokens=1_500),
+    "verify_authors":       TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=4_000, max_output_tokens=1_500),
     "premium":            TaskConfig(model="gpt-4o", max_input_tokens=8_000, max_output_tokens=4_000),
 }
 

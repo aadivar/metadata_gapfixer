@@ -414,6 +414,136 @@ def get_provenance(sub_id: int):
     return {"provenance": meta.get("provenance") or {}}
 
 
+# --- Confirm / reject — editor's teaching signals --------------------------
+
+class ConfirmRequest(BaseModel):
+    field_path: str   # e.g. "title", "doi", "authors[3].orcid"
+
+
+@router.post("/{sub_id}/confirm")
+def post_confirm(sub_id: int, req: ConfirmRequest):
+    """Editor confirms a field's value is correct. Promotes provenance.confirmed=True."""
+    from ..services.scoring import score
+    meta = _load_metadata(sub_id)
+    fs = _load_factsheet(sub_id)
+    prov = meta.setdefault("provenance", {})
+    entry = prov.get(req.field_path) or {}
+    entry["confirmed"] = True
+    entry["confirmed_at"] = datetime.utcnow().isoformat(timespec="seconds")
+    prov[req.field_path] = entry
+    _save_metadata(sub_id, meta)
+    return {"ok": True, "field_path": req.field_path, "score": score(fs, meta).model_dump()}
+
+
+class LocateRequest(BaseModel):
+    field_path: str
+    page: int
+    box_ids: list[int]
+
+
+@router.post("/{sub_id}/locate")
+def post_locate(sub_id: int, req: LocateRequest):
+    """Editor pointed to box(es) on a PDF page to fill a field. Joins the
+    text of the selected boxes, optionally regex-extracts an identifier if
+    the field expects one (DOI / ORCID / ISSN), and writes the value into
+    metadata with provenance source='user_locate'."""
+    import re as _re
+    from ..services.autofix import _apply_value_at_path
+    from ..services.scoring import score
+
+    layout = _load_layout(sub_id)
+    page = next((p for p in layout["pages"] if p["page"] == req.page), None)
+    if not page:
+        raise HTTPException(404, f"page {req.page} not found")
+    selected = [b for b in page["boxes"] if b["id"] in set(req.box_ids)]
+    if not selected:
+        raise HTTPException(400, "no boxes selected")
+    joined = " ".join((b.get("text") or "").strip() for b in selected if b.get("text"))
+    joined = _re.sub(r"\s+", " ", joined).strip()
+
+    # Field-aware extraction
+    fp_low = req.field_path.lower()
+    value: object = joined
+    extraction_note = ""
+    if "doi" in fp_low:
+        m = _re.search(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", joined, _re.IGNORECASE)
+        if m:
+            value = m.group(0).rstrip(".,;)]>")
+            extraction_note = " (DOI regex-extracted from selection)"
+        else:
+            raise HTTPException(400, "no DOI pattern found in the selected text")
+    elif "orcid" in fp_low:
+        m = _re.search(r"\b\d{4}-\d{4}-\d{4}-\d{3}[\dX]\b", joined)
+        if m:
+            value = m.group(0)
+            extraction_note = " (ORCID regex-extracted)"
+        else:
+            raise HTTPException(400, "no ORCID pattern (####-####-####-###X) in the selected text")
+    elif fp_low.endswith("issn") or fp_low.endswith("issn_electronic") or fp_low.endswith("issn_print"):
+        m = _re.search(r"\b\d{4}-\d{3}[\dX]\b", joined)
+        if m:
+            value = m.group(0)
+            extraction_note = " (ISSN regex-extracted)"
+        else:
+            raise HTTPException(400, "no ISSN pattern (####-###X) in the selected text")
+    elif "ror" in fp_low:
+        m = _re.search(r"https?://ror\.org/[a-z0-9]+", joined, _re.IGNORECASE)
+        if m:
+            value = m.group(0)
+            extraction_note = " (ROR URL regex-extracted)"
+        elif _re.match(r"^[a-z0-9]{6,}$", joined.strip()):
+            value = f"https://ror.org/{joined.strip()}"
+            extraction_note = " (ROR ID coerced to URL form)"
+
+    meta = _load_metadata(sub_id)
+    fs = _load_factsheet(sub_id)
+    try:
+        _apply_value_at_path(meta, req.field_path, value)
+    except Exception as exc:
+        raise HTTPException(400, f"could not write to {req.field_path}: {exc}")
+
+    prov = meta.setdefault("provenance", {})
+    prov[req.field_path] = {
+        "source": "user_locate",
+        "confidence": 1.0,
+        "confirmed": True,
+        "reasoning": f"Editor pointed to {len(selected)} box(es) on page {req.page}{extraction_note}.",
+        "located_page": req.page,
+        "located_box_ids": req.box_ids,
+        "located_text": joined[:400],
+    }
+    _save_metadata(sub_id, meta)
+    return {
+        "ok": True,
+        "field_path": req.field_path,
+        "value": value,
+        "score": score(fs, meta).model_dump(),
+    }
+
+
+@router.post("/{sub_id}/reject")
+def post_reject(sub_id: int, req: ConfirmRequest):
+    """Editor rejects a field's value. Clears value at path; flips provenance source
+    to 'needs_locate' so the GUI can render a Locate-in-document interaction."""
+    from ..services.autofix import _apply_value_at_path
+    from ..services.scoring import score
+    meta = _load_metadata(sub_id)
+    fs = _load_factsheet(sub_id)
+    try:
+        _apply_value_at_path(meta, req.field_path, None)
+    except Exception:
+        pass
+    prov = meta.setdefault("provenance", {})
+    entry = prov.get(req.field_path) or {}
+    entry["source"] = "needs_locate"
+    entry["confidence"] = 0.0
+    entry["confirmed"] = False
+    entry["reasoning"] = "Editor rejected the auto-extracted value; awaiting manual locate."
+    prov[req.field_path] = entry
+    _save_metadata(sub_id, meta)
+    return {"ok": True, "field_path": req.field_path, "score": score(fs, meta).model_dump()}
+
+
 # --- Manual pick (FREE) and explicit AI disambiguation (PAID) --------------
 
 class PickRequest(BaseModel):
@@ -468,6 +598,31 @@ def post_structure_estimate(sub_id: int, task: str):
     if task not in STRUCTURERS:
         raise HTTPException(400, f"unknown structurer: {task}")
     return estimate_structurer_cost(task)
+
+
+@router.post("/{sub_id}/enrich/all")
+def post_enrich_all(sub_id: int):
+    """Run every premium AI enrichment task in sequence:
+    verify_authors → structure_references → structure_funding → structure_credit.
+    Each is publisher-opt-in; this is the 'one click for the works' button."""
+    from ..services.scoring import score
+    from ..services.structurers import run_structurer
+
+    fs = _load_factsheet(sub_id)
+    meta = _load_metadata(sub_id)
+    with get_session() as s:
+        sub = s.get(Submission, sub_id)
+        if not sub or not sub.docling_json_path:
+            raise HTTPException(404, "not parsed yet")
+        docling_doc = json.loads(Path(sub.docling_json_path).read_text())
+
+    sequence = ["verify_authors", "structure_references", "structure_funding", "structure_credit"]
+    reports = []
+    for task in sequence:
+        rep = run_structurer(task, meta, fs, docling_doc, sub_id=sub_id)
+        reports.append(rep)
+    _save_metadata(sub_id, meta)
+    return {"reports": reports, "score": score(fs, meta).model_dump()}
 
 
 @router.post("/{sub_id}/structure/{task}")
