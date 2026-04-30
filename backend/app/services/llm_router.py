@@ -42,11 +42,13 @@ _DEFAULT_MODEL = settings.openai_model or "gpt-4o-mini"
 
 TASK_CONFIG: dict[str, TaskConfig] = {
     "name_normalize":     TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=2_000),
-    "ror_disambiguate":   TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=1_500),
-    "ref_resolve":        TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=4_000, max_output_tokens=3_000),
     "assemble_metadata":  TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=6_000, max_output_tokens=3_000),
     "preprint_detect":    TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=1_000),
-    "funder_confirm":     TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=1_000),
+    # Disambiguation tasks — pick the right candidate from N enricher results.
+    "orcid_pick":         TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=2_000, max_output_tokens=600),
+    "ror_pick":           TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=2_000, max_output_tokens=600),
+    "funder_pick":        TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=2_000, max_output_tokens=600),
+    "reference_pick":     TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=4_000, max_output_tokens=1_000),
     "premium":            TaskConfig(model="gpt-4o", max_input_tokens=8_000, max_output_tokens=4_000),
 }
 
@@ -183,6 +185,96 @@ class LLMRouter:
 
         content = resp.choices[0].message.content or "{}"
         return schema.model_validate_json(content)
+
+
+# ============================================================================
+# Disambiguation — universal "pick the right candidate" interface
+# ============================================================================
+
+class Alternative(BaseModel):
+    id: str | None = None
+    label: str | None = None
+    score: float | None = None
+    note: str | None = None  # one-line per-candidate reasoning
+
+
+class Disambiguation(BaseModel):
+    chosen_id: str | None
+    confidence: float  # 0..1
+    reasoning: str     # 2-3 sentences citing specific evidence
+    ranked_alternatives: list[Alternative] = []
+
+
+_DISAMBIGUATE_SYSTEM = """You are a scholarly-metadata disambiguation assistant.
+
+You will receive a query (a record we want to identify) and a list of
+candidates returned by an enricher API ({source}). Pick the single best
+match from the candidates — or return null in `chosen_id` if no candidate
+is clearly correct.
+
+Rules:
+- Confidence below 0.6 means "uncertain — editor should confirm." Be
+  honest; do not inflate confidence to look helpful.
+- `reasoning` must be 2-3 sentences citing specific evidence (matching
+  fields, geographic alignment, organisational hierarchy, etc.). It is
+  the editor's audit trail.
+- For `ranked_alternatives`, include the top candidates with a 1-line
+  note for each explaining why it ranked where it did.
+- Never invent candidates that are not in the input list. If you mention
+  an ID, it must come verbatim from `candidates`.
+- Match conservatively. A 0.9 confidence pick is one where the candidate
+  matches the query on at least two independent attributes (e.g. name +
+  affiliation, or title + author + year)."""
+
+
+def _safe_json(payload: Any) -> str:
+    try:
+        return json.dumps(payload, default=str, ensure_ascii=False)
+    except Exception:
+        return str(payload)
+
+
+# Patch on LLMRouter
+def _disambiguate(
+    self: "LLMRouter",
+    task: str,
+    source: str,
+    query: dict,
+    candidates: list[dict],
+    *,
+    cap_usd: float | None = None,
+) -> Disambiguation:
+    """Pick the right candidate (or none) from an enricher's results.
+
+    Args:
+        task: TASK_CONFIG key — e.g. "orcid_pick", "ror_pick", "funder_pick", "reference_pick".
+        source: human-readable enricher name for the system prompt — "ORCID", "ROR", etc.
+        query: the record we're trying to identify (e.g. {given, family, affiliation}).
+        candidates: list of candidate dicts as returned by the enricher.
+    """
+    if not candidates:
+        return Disambiguation(chosen_id=None, confidence=0.0,
+                              reasoning="Enricher returned no candidates.")
+    if len(candidates) == 1:
+        c = candidates[0]
+        cid = c.get("id") or c.get("orcid") or c.get("ror_id") or c.get("doi") or c.get("openalex_id")
+        return Disambiguation(
+            chosen_id=str(cid) if cid else None,
+            confidence=1.0,
+            reasoning="Only one candidate returned by the enricher.",
+            ranked_alternatives=[Alternative(id=str(cid) if cid else None, label=str(c)[:120], score=1.0, note="sole candidate")],
+        )
+
+    user_payload = {"query": query, "candidates": candidates[:10]}  # cap candidates per call
+    return self.call(
+        task=task,
+        system=_DISAMBIGUATE_SYSTEM.format(source=source),
+        user=_safe_json(user_payload),
+        schema=Disambiguation,
+        cap_usd=cap_usd,
+    )
+
+LLMRouter.disambiguate = _disambiguate  # type: ignore[attr-defined]
 
 
 # ============================================================================

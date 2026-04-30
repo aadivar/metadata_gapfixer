@@ -219,7 +219,7 @@ def post_autofix(sub_id: int, req: AutofixRequest):
             raise HTTPException(404, "not parsed yet")
         docling_doc = json.loads(Path(sub.docling_json_path).read_text())
 
-    report = run_autofix(req.action, meta, fs, docling_doc)
+    report = run_autofix(req.action, meta, fs, docling_doc, sub_id=sub_id)
     _save_metadata(sub_id, meta)
     new_score = score(fs, meta)
     return {"report": report, "score": new_score.model_dump()}
@@ -247,7 +247,7 @@ def post_autofix_all(sub_id: int):
         if fd.bucket != "high" or not fd.autofix_action or fd.autofix_action in seen:
             continue
         seen.add(fd.autofix_action)
-        actions_done.append(run_autofix(fd.autofix_action, meta, fs, docling_doc))
+        actions_done.append(run_autofix(fd.autofix_action, meta, fs, docling_doc, sub_id=sub_id))
 
     _save_metadata(sub_id, meta)
     new_score = score(fs, meta)
@@ -405,6 +405,88 @@ def get_metadata(sub_id: int):
         if not sub or not sub.metadata_json_path:
             raise HTTPException(404, "metadata not ready")
         return JSONResponse(json.loads(Path(sub.metadata_json_path).read_text()))
+
+
+@router.get("/{sub_id}/provenance")
+def get_provenance(sub_id: int):
+    """Return just the per-field provenance map for the GUI's audit trail."""
+    meta = _load_metadata(sub_id)
+    return {"provenance": meta.get("provenance") or {}}
+
+
+# --- Manual pick (FREE) and explicit AI disambiguation (PAID) --------------
+
+class PickRequest(BaseModel):
+    field_path: str   # e.g. "authors[5].orcid", "funders[0].doi", "references[12].doi"
+    chosen_id: str    # the `id` of one of the candidates in the provenance list
+
+
+@router.post("/{sub_id}/pick")
+def post_manual_pick(sub_id: int, req: PickRequest):
+    """Apply a manual editor pick from the candidate list. ZERO LLM cost."""
+    from ..services.autofix import apply_pick
+    from ..services.scoring import score
+    meta = _load_metadata(sub_id)
+    fs = _load_factsheet(sub_id)
+    result = apply_pick(meta, req.field_path, req.chosen_id)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error", "pick failed"))
+    _save_metadata(sub_id, meta)
+    return {"result": result, "score": score(fs, meta).model_dump()}
+
+
+class DisambiguateRequest(BaseModel):
+    field_path: str | None = None
+    field_paths: list[str] | None = None  # batch — pass either field_path or field_paths
+
+
+@router.post("/{sub_id}/disambiguate/estimate")
+def post_disambiguate_estimate(sub_id: int, req: DisambiguateRequest):
+    """Preview the LLM cost before the publisher commits. NO LLM call here."""
+    from ..services.autofix import estimate_disambiguation_cost
+    meta = _load_metadata(sub_id)
+    paths = [req.field_path] if req.field_path else req.field_paths
+    return estimate_disambiguation_cost(meta, paths)
+
+
+@router.post("/{sub_id}/disambiguate")
+def post_disambiguate(sub_id: int, req: DisambiguateRequest):
+    """Run AI disambiguation for one or more specified fields. PAID — every
+    call goes into the per-submission cost ledger and is the publisher's
+    deliberate, opt-in spend.
+    """
+    from ..services.autofix import disambiguate_field, estimate_disambiguation_cost
+    from ..services.scoring import score
+
+    meta = _load_metadata(sub_id)
+    fs = _load_factsheet(sub_id)
+
+    paths: list[str]
+    if req.field_path:
+        paths = [req.field_path]
+    elif req.field_paths:
+        paths = req.field_paths
+    else:
+        # default = adjudicate ALL needs_pick fields (the publisher already
+        # consented by hitting this endpoint without naming specific paths)
+        paths = [p for p, v in (meta.get("provenance") or {}).items()
+                 if v.get("source") == "needs_pick"]
+
+    if not paths:
+        return {"ok": True, "results": [], "score": score(fs, meta).model_dump()}
+
+    estimate = estimate_disambiguation_cost(meta, paths)
+    results = []
+    for p in paths:
+        results.append(disambiguate_field(meta, p, sub_id=sub_id))
+
+    _save_metadata(sub_id, meta)
+    return {
+        "ok": True,
+        "results": results,
+        "estimate": estimate,
+        "score": score(fs, meta).model_dump(),
+    }
 
 
 @router.put("/{sub_id}/metadata")

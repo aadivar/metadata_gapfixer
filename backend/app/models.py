@@ -48,6 +48,16 @@ class JournalArticleMetadata(BaseModel):
     license_url: Optional[str] = None
     confidence_notes: dict[str, str] = Field(default_factory=dict)
 
+    # Per-field provenance: {field_path: {source, confidence, reasoning, alternatives}}
+    # field_path examples:
+    #   "doi" — top-level field
+    #   "authors[3].orcid" — author at index 3, orcid sub-field
+    #   "funders[0].doi"
+    # Sources: "factsheet" | "regex" | "docling" | "header_parser" | "boilerplate"
+    #          | "orcid_api" | "ror_api" | "openalex_api" | "crossref_api"
+    #          | "llm_disambiguated" | "needs_review" | "user_edit"
+    provenance: dict[str, dict] = Field(default_factory=dict)
+
 
 class SubmissionOut(BaseModel):
     id: int
