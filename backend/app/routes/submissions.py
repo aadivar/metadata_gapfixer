@@ -189,6 +189,20 @@ def get_factsheet(sub_id: int):
     return JSONResponse(json.loads(fs_path.read_text()))
 
 
+@router.get("/{sub_id}/references_layout")
+def get_references_layout(sub_id: int):
+    """Layout-detected references section: per-item text + bboxes + page range
+    + detection method + confidence. Used by the GUI to show the detected
+    section on the page render for editor confirmation."""
+    from ..services.references_layout import detect_references
+    with get_session() as s:
+        sub = s.get(Submission, sub_id)
+        if not sub or not sub.docling_json_path:
+            raise HTTPException(404, "not parsed yet")
+        docling_doc = json.loads(Path(sub.docling_json_path).read_text())
+    return detect_references(docling_doc).model_dump()
+
+
 # --- Scorecard -------------------------------------------------------------
 
 @router.get("/{sub_id}/score")

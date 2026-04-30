@@ -127,17 +127,39 @@ def _ensure_funders(meta: dict, fs: Factsheet) -> list[dict]:
 def _ensure_references(meta: dict, fs: Factsheet, docling_doc: dict) -> list[dict]:
     if meta.get("references"):
         return meta["references"]
-    md = docling_doc.get("markdown") or ""
-    m = re.search(r"(?:^|\n)#{1,3}\s*(?:References|Bibliography|Works\s+cited)\s*\n(.+?)(?:\n#{1,3}\s|\Z)",
-                  md, re.IGNORECASE | re.DOTALL)
-    refs_text = m.group(1) if m else ""
-    if not refs_text:
-        return []
-    items = re.split(r"\n\s*(?:\d{1,3}\.|\[\d{1,3}\]|\-)\s+", "\n" + refs_text.strip())
-    items = [r.strip() for r in items if r.strip() and len(r.strip()) > 20]
+
+    # Tier 1-3: layout-aware detection (Docling label → section walk → visual cluster)
+    from .references_layout import detect_references
+    layout = detect_references(docling_doc)
+    refs_strings: list[str] = []
+    detection_method = "none"
+    detection_confidence = 0.0
+    detection_notes = ""
+    page_range_str = ""
+
+    if layout.items:
+        refs_strings = [item.text for item in layout.items if item.text]
+        detection_method = f"layout_{layout.method}"
+        detection_confidence = layout.confidence
+        detection_notes = layout.notes
+        if layout.page_start and layout.page_end:
+            page_range_str = (f"pp.{layout.page_start}" if layout.page_start == layout.page_end
+                              else f"pp.{layout.page_start}-{layout.page_end}")
+    else:
+        # Fallback: markdown regex split
+        md = docling_doc.get("markdown") or ""
+        m = re.search(r"(?:^|\n)#{1,3}\s*(?:References|Bibliography|Works\s+cited)\s*\n(.+?)(?:\n#{1,3}\s|\Z)",
+                      md, re.IGNORECASE | re.DOTALL)
+        refs_text = m.group(1) if m else ""
+        if refs_text:
+            items = re.split(r"\n\s*(?:\d{1,3}\.|\[\d{1,3}\]|\-)\s+", "\n" + refs_text.strip())
+            refs_strings = [r.strip() for r in items if r.strip() and len(r.strip()) > 20]
+            detection_method = "markdown_regex"
+            detection_confidence = 0.6
+            detection_notes = "Fell back to markdown regex split (layout detection found no candidates)."
 
     refs: list[dict] = []
-    for raw in items:
+    for raw in refs_strings:
         raw_one = re.sub(r"\s+", " ", raw)
         doi_m = re.search(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", raw_one, re.IGNORECASE)
         year_m = re.search(r"\b(19|20)\d{2}\b", raw_one)
@@ -148,6 +170,17 @@ def _ensure_references(meta: dict, fs: Factsheet, docling_doc: dict) -> list[dic
             "year": int(year_m.group(0)) if year_m else None,
         })
     meta["references"] = refs
+
+    # Record where the section came from — feeds the editor-confirmation UI
+    if refs:
+        meta.setdefault("provenance", {})["references"] = {
+            "source": detection_method,
+            "confidence": detection_confidence,
+            "reasoning": (detection_notes + (f" {page_range_str}" if page_range_str else "")).strip(),
+            "page_start": layout.page_start,
+            "page_end": layout.page_end,
+            "item_count": len(refs),
+        }
     return refs
 
 

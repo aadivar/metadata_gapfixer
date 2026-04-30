@@ -260,7 +260,18 @@ Rules:
 
 
 def _split_references_text(docling_doc: dict, fs: Factsheet) -> list[str]:
-    """Pull raw reference strings from the references section."""
+    """Pull raw reference strings from the references section.
+
+    Uses the layout-aware detector first (handles non-standard heading
+    labels and visually-clustered references) and falls back to markdown
+    regex if no layout cues are found.
+    """
+    from .references_layout import detect_references
+    layout = detect_references(docling_doc)
+    if layout.items:
+        return [re.sub(r"\s+", " ", item.text).strip()[:600]
+                for item in layout.items if item.text and len(item.text.strip()) > 20]
+
     md = docling_doc.get("markdown") or ""
     m = re.search(r"(?:^|\n)#{1,3}\s*(?:References|Bibliography|Works\s+cited)\s*\n(.+?)(?:\n#{1,3}\s|\Z)",
                   md, re.IGNORECASE | re.DOTALL)
