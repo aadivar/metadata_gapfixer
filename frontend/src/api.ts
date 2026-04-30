@@ -46,6 +46,11 @@ export async function getSubmission(id: number): Promise<Submission> {
   return r.json();
 }
 
+export async function deleteSubmission(id: number): Promise<void> {
+  const r = await fetch(`${API}/submissions/${id}`, { method: "DELETE" });
+  if (!r.ok) throw new Error(`delete failed: ${r.status}`);
+}
+
 export async function getSections(id: number): Promise<{ sections: Section[]; count: number }> {
   const r = await fetch(`${API}/submissions/${id}/sections`);
   if (!r.ok) throw new Error(`sections failed: ${r.status}`);
@@ -148,4 +153,74 @@ export async function buildXml(id: number): Promise<{ path: string }> {
 
 export function xmlDownloadUrl(id: number): string {
   return `${API}/submissions/${id}/xml`;
+}
+
+// ───────────────────────── Scorecard / autofix ─────────────────────────
+
+export type Tier = "T0" | "T1" | "T2" | "T3";
+export type Bucket = "high" | "medium" | "manual";
+
+export type FieldScore = {
+  key: string;
+  label: string;
+  tier: Tier;
+  weight: number;
+  bucket: Bucket;
+  status: "present" | "missing";
+  value_preview?: string | null;
+  autofix_action?: string | null;
+  why: string;
+};
+
+export type TierScore = {
+  tier: Tier;
+  label: string;
+  score: number;
+  fields_present: number;
+  fields_total: number;
+};
+
+export type Scorecard = {
+  composite: number;
+  interpretation: string;
+  tiers: TierScore[];
+  fields: FieldScore[];
+  high_impact: FieldScore[];
+  medium: FieldScore[];
+  manual: FieldScore[];
+  facts_summary: Record<string, any>;
+};
+
+export async function getScore(id: number): Promise<Scorecard> {
+  const r = await fetch(`${API}/submissions/${id}/score`);
+  if (!r.ok) throw new Error(`score failed: ${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+export async function autofix(id: number, action: string): Promise<{ report: any; score: Scorecard }> {
+  const r = await fetch(`${API}/submissions/${id}/autofix`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+  if (!r.ok) throw new Error(`autofix failed: ${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+export async function autofixAll(id: number): Promise<{ reports: any[]; score: Scorecard }> {
+  const r = await fetch(`${API}/submissions/${id}/autofix/all`, { method: "POST" });
+  if (!r.ok) throw new Error(`autofix-all failed: ${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+export async function getCost(id: number): Promise<{ total_usd: number; calls: any[] }> {
+  const r = await fetch(`${API}/submissions/${id}/cost`);
+  if (!r.ok) throw new Error(`cost failed: ${r.status}`);
+  return r.json();
+}
+
+export async function getFactsheet(id: number): Promise<any> {
+  const r = await fetch(`${API}/submissions/${id}/factsheet`);
+  if (!r.ok) throw new Error(`factsheet failed: ${r.status}`);
+  return r.json();
 }

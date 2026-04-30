@@ -1,213 +1,99 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
+  autofix,
+  autofixAll,
   buildXml,
-  Entity,
-  getLabelPresets,
+  FieldScore,
+  getCost,
+  getFactsheet,
   getMetadata,
-  getPages,
-  getPageBoxes,
-  getSection,
-  getSections,
-  LayoutBox,
-  PageInfo,
-  pageImageUrl,
+  getScore,
   putMetadata,
   reconcile,
-  runNer,
-  saveEntitiesSnapshot,
-  Section,
+  Scorecard,
+  Tier,
   xmlDownloadUrl,
 } from "../api";
 
-type PerSection = Record<string, Entity[]>;
-type Mode = "layout" | "sections";
-
-const CATEGORY_COLOR: Record<string, string> = {
-  header: "#6aa9ff",
-  text: "#aaaaaa",
-  table: "#ffb86a",
-  figure: "#ff6aa9",
-  furniture: "#555555",
-  code: "#6aff9b",
-  formula: "#bb88ff",
-  other: "#888888",
+const TIER_DESCRIPTION: Record<Tier, string> = {
+  T0: "Crossref schema 5.4.0 — required to deposit at all.",
+  T1: "Crossref recommended — what makes the record usable for indexers.",
+  T2: "Crossref Participation / Nexus benchmarks — what enables cross-system linking.",
+  T3: "Joint Crossref+DataCite integrity guide — what makes this record trustable.",
 };
 
-const PRESET_HINTS: Record<string, string> = {
-  preamble: "header",
-  title: "header",
-  abstract: "abstract",
-  funding: "funding",
-  acknowledgements: "funding",
-  references: "references",
-  bibliography: "references",
-};
-
-function suggestPreset(label: string, heading?: string): string {
-  const h = (heading || "").toLowerCase();
-  for (const key of Object.keys(PRESET_HINTS)) {
-    if (h.includes(key) || label === key) return PRESET_HINTS[key];
-  }
-  return "header";
+function scoreColor(score: number): string {
+  if (score >= 80) return "var(--ok)";
+  if (score >= 50) return "var(--warn)";
+  return "var(--error)";
 }
 
 export default function Review() {
   const { id } = useParams();
   const subId = Number(id);
 
-  const [mode, setMode] = useState<Mode>("layout");
-  const [presets, setPresets] = useState<Record<string, Record<string, string>>>({});
-  const [preset, setPreset] = useState<string>("header");
-  const [perKey, setPerKey] = useState<PerSection>({});
+  const [card, setCard] = useState<Scorecard | null>(null);
+  const [factsheet, setFactsheet] = useState<any>(null);
+  const [cost, setCost] = useState<{ total_usd: number; calls: any[] }>({ total_usd: 0, calls: [] });
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
   const [metaText, setMetaText] = useState<string>("");
+  const [showMeta, setShowMeta] = useState(false);
   const [xmlBuilt, setXmlBuilt] = useState(false);
 
-  // Layout-mode state
-  const [pages, setPages] = useState<PageInfo[]>([]);
-  const [pageNo, setPageNo] = useState<number>(1);
-  const [boxes, setBoxes] = useState<LayoutBox[]>([]);
-  const [pageDims, setPageDims] = useState<{ w: number; h: number }>({ w: 1, h: 1 });
-  const [selectedBoxIds, setSelectedBoxIds] = useState<Set<number>>(new Set());
-  const [hasLayout, setHasLayout] = useState<boolean>(true);
-
-  // Sections-mode state
-  const [sections, setSections] = useState<Section[]>([]);
-  const [selectedSecId, setSelectedSecId] = useState<number | null>(null);
-  const [section, setSection] = useState<Section | null>(null);
-
-  // Initial load
-  useEffect(() => {
-    (async () => {
-      try {
-        const [pp, ps] = await Promise.all([getPages(subId), getLabelPresets()]);
-        setPresets(ps);
-        if (pp.page_count > 0) {
-          setPages(pp.pages);
-          setHasLayout(true);
-        } else {
-          setHasLayout(false);
-          setMode("sections");
-          const secs = await getSections(subId);
-          setSections(secs.sections);
-          if (secs.sections.length > 0) setSelectedSecId(secs.sections[0].id);
-        }
-      } catch (e) {
-        setErr(String(e));
-      }
-    })();
-  }, [subId]);
-
-  // Layout: load boxes for selected page
-  useEffect(() => {
-    if (mode !== "layout" || pages.length === 0) return;
-    (async () => {
-      try {
-        const r = await getPageBoxes(subId, pageNo);
-        setBoxes(r.boxes);
-        setPageDims({ w: r.w_px, h: r.h_px });
-      } catch (e) {
-        setErr(String(e));
-      }
-    })();
-  }, [subId, pageNo, mode, pages.length]);
-
-  // Sections: when selectedSecId changes, fetch full section text
-  useEffect(() => {
-    if (mode !== "sections" || selectedSecId === null) return;
-    (async () => {
-      try {
-        const s = await getSection(subId, selectedSecId);
-        setSection(s);
-        setPreset(suggestPreset(s.label, s.heading));
-      } catch (e) {
-        setErr(String(e));
-      }
-    })();
-  }, [subId, selectedSecId, mode]);
-
-  const selectedBoxes = useMemo(
-    () => boxes.filter((b) => selectedBoxIds.has(b.id)),
-    [boxes, selectedBoxIds]
-  );
-
-  const selectedText = useMemo(
-    () => selectedBoxes.map((b) => b.text).filter(Boolean).join("\n\n"),
-    [selectedBoxes]
-  );
-
-  const totalEntities = useMemo(
-    () => Object.values(perKey).reduce((n, arr) => n + arr.length, 0),
-    [perKey]
-  );
-
-  function toggleBox(id: number) {
-    setSelectedBoxIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  function clearSelection() {
-    setSelectedBoxIds(new Set());
-  }
-
-  async function nerOnSelected() {
-    if (!selectedText.trim()) {
-      setErr("No boxes selected.");
-      return;
-    }
-    setBusy("Running NER…");
-    setErr(null);
+  async function refresh() {
     try {
-      const res = await runNer(subId, { text: selectedText, preset });
-      const key = `p${pageNo}_b${[...selectedBoxIds].sort().join("-")}`;
-      setPerKey((prev) => ({ ...prev, [key]: res.entities }));
+      const [c, fs, co] = await Promise.all([
+        getScore(subId),
+        getFactsheet(subId).catch(() => null),
+        getCost(subId).catch(() => ({ total_usd: 0, calls: [] })),
+      ]);
+      setCard(c);
+      setFactsheet(fs);
+      setCost(co);
     } catch (e) {
       setErr(String(e));
-    } finally {
-      setBusy(null);
     }
   }
 
-  async function nerOnSection() {
-    if (!section) return;
-    setBusy("Running NER…");
-    setErr(null);
-    try {
-      const res = await runNer(subId, { text: section.text || "", preset });
-      setPerKey((prev) => ({ ...prev, [`s${section.id}`]: res.entities }));
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
+  useEffect(() => { refresh(); }, [subId]);
 
-  async function doSaveSnapshot() {
-    setBusy("Saving entities…");
-    setErr(null);
+  async function loadMetadata() {
     try {
-      await saveEntitiesSnapshot(subId, perKey);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function doReconcile() {
-    setBusy("Reconciling with LLM (tool-calling)…");
-    setErr(null);
-    try {
-      await saveEntitiesSnapshot(subId, perKey);
-      await reconcile(subId);
       const m = await getMetadata(subId);
       setMetaText(JSON.stringify(m, null, 2));
+      setShowMeta(true);
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
+  function summarizeReport(r: any): string {
+    if (!r) return "no report";
+    if (r.error) return `failed: ${r.error}`;
+    const bits: string[] = [];
+    if (Array.isArray(r.changes)) bits.push(`changed: ${r.changes.join(", ") || "nothing"}`);
+    if (typeof r.resolved === "number") bits.push(`resolved ${r.resolved}${r.out_of ? "/" + r.out_of : ""}`);
+    if (typeof r.added_refs === "number") bits.push(`added ${r.added_refs} refs`);
+    return bits.length ? bits.join(" · ") : (r.ok ? "ok (no changes)" : "no changes");
+  }
+
+  function showToast(msg: string) {
+    setToast(msg);
+    setTimeout(() => setToast(null), 5000);
+  }
+
+  async function fixOne(action: string) {
+    setBusy(`Running ${action}…`);
+    setErr(null);
+    try {
+      const res = await autofix(subId, action);
+      setCard(res.score);
+      showToast(`${action} → ${summarizeReport(res.report)}`);
+      const co = await getCost(subId).catch(() => null);
+      if (co) setCost(co);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -215,10 +101,31 @@ export default function Review() {
     }
   }
 
-  async function saveMetadata() {
-    setBusy("Saving metadata…");
+  async function fixAll() {
+    setBusy("Running all auto-fixes…");
+    setErr(null);
     try {
-      await putMetadata(subId, JSON.parse(metaText));
+      const res = await autofixAll(subId);
+      setCard(res.score);
+      const summary = (res.reports || [])
+        .map((r: any) => `${r.action}: ${summarizeReport(r)}`)
+        .join("  |  ");
+      showToast(summary || "auto-fix complete");
+      const co = await getCost(subId).catch(() => null);
+      if (co) setCost(co);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function premiumReconcile() {
+    setBusy("Reconciling with LLM (premium)…");
+    setErr(null);
+    try {
+      await reconcile(subId);
+      await refresh();
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -227,7 +134,7 @@ export default function Review() {
   }
 
   async function generateXml() {
-    setBusy("Generating XML…");
+    setBusy("Generating Crossref XML…");
     try {
       await buildXml(subId);
       setXmlBuilt(true);
@@ -238,233 +145,157 @@ export default function Review() {
     }
   }
 
-  const currentPage = pages.find((p) => p.page === pageNo);
+  async function saveMetaEdits() {
+    setBusy("Saving…");
+    try {
+      await putMetadata(subId, JSON.parse(metaText));
+      await refresh();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (!card) {
+    return (
+      <section>
+        <div className="page-header">
+          <div className="crumbs"><Link to="/upload">Submissions</Link> / #{subId}</div>
+          <h1>Review</h1>
+        </div>
+        <div className="card"><p className="muted loading">Loading scorecard</p></div>
+        {err && <div className="card"><p className="error">{err}</p></div>}
+      </section>
+    );
+  }
 
   return (
     <section>
-      <div className="card">
+      <div className="page-header">
+        <div className="crumbs">
+          <Link to="/upload">Submissions</Link> / #{subId}
+        </div>
         <div className="row">
-          <h2>Submission #{subId}</h2>
-          <Link to="/upload">← Back</Link>
+          <h1>Metadata gap report</h1>
+          <span className="muted small mono">cost so far · ${cost.total_usd.toFixed(4)}</span>
         </div>
-        <p className="muted">
-          {totalEntities} entities extracted across {Object.keys(perKey).length} runs
-        </p>
-        <div className="tabs">
-          <button
-            className={mode === "layout" ? "active" : ""}
-            onClick={() => setMode("layout")}
-            disabled={!hasLayout}
-            title={hasLayout ? "" : "Layout view only available for PDFs"}
-          >
-            Layout (click to select)
-          </button>
-          <button className={mode === "sections" ? "active" : ""} onClick={() => setMode("sections")}>
-            Sections
-          </button>
-        </div>
-        {busy && <p className="muted">{busy}</p>}
-        {err && <p className="error">{err}</p>}
       </div>
 
-      {mode === "layout" && hasLayout && (
-        <div className="card">
-          <div className="page-controls">
-            <button onClick={() => setPageNo((p) => Math.max(1, p - 1))} disabled={pageNo <= 1}>
-              ← Prev
-            </button>
-            <span>
-              Page{" "}
-              <input
-                type="number"
-                min={1}
-                max={pages.length}
-                value={pageNo}
-                onChange={(e) => setPageNo(Math.max(1, Math.min(pages.length, Number(e.target.value))))}
-                style={{ width: 60 }}
-              />{" "}
-              / {pages.length}
-            </span>
-            <button onClick={() => setPageNo((p) => Math.min(pages.length, p + 1))} disabled={pageNo >= pages.length}>
-              Next →
-            </button>
-            <span className="muted">{boxes.length} boxes on this page</span>
-            <span className="spacer" />
-            <button onClick={clearSelection} disabled={selectedBoxIds.size === 0}>
-              Clear selection ({selectedBoxIds.size})
-            </button>
+      {/* ── HERO SCORECARD ──────────────────────────────────────────── */}
+      <div className="card scorecard-hero">
+        <div className="hero-grid">
+          <div className="hero-score" style={{ borderColor: scoreColor(card.composite) }}>
+            <div className="hero-num" style={{ color: scoreColor(card.composite) }}>{card.composite}</div>
+            <div className="hero-den">/ 100</div>
           </div>
-
-          <div className="layout-grid">
-            <div
-              className="page-canvas-wrap"
-              style={currentPage ? { aspectRatio: `${currentPage.w_px} / ${currentPage.h_px}` } : undefined}
-            >
-              {currentPage && (
-                <>
-                  <img src={pageImageUrl(subId, pageNo)} draggable={false} />
-                  <div className="overlay-layer">
-                    {boxes.map((b) => {
-                      const sel = selectedBoxIds.has(b.id);
-                      const color = CATEGORY_COLOR[b.category] || CATEGORY_COLOR.other;
-                      return (
-                        <div
-                          key={b.id}
-                          className={`box ${sel ? "selected" : ""}`}
-                          style={{
-                            left: `${(b.bbox.x / currentPage.w_px) * 100}%`,
-                            top: `${(b.bbox.y / currentPage.h_px) * 100}%`,
-                            width: `${(b.bbox.w / currentPage.w_px) * 100}%`,
-                            height: `${(b.bbox.h / currentPage.h_px) * 100}%`,
-                            borderColor: color,
-                            background: sel ? `${color}33` : "transparent",
-                          }}
-                          title={`${b.label}: ${b.text.slice(0, 120)}`}
-                          onClick={() => toggleBox(b.id)}
-                        />
-                      );
-                    })}
+          <div className="hero-text">
+            <h2 className="card-title" style={{ marginBottom: 8 }}>{card.interpretation}</h2>
+            <div className="tier-bars">
+              {card.tiers.map((t) => (
+                <div key={t.tier} className="tier-row" title={TIER_DESCRIPTION[t.tier]}>
+                  <span className="tier-name">
+                    <strong>{t.tier}</strong> {t.label}
+                  </span>
+                  <div className="tier-track">
+                    <div className="tier-fill" style={{ width: `${t.score}%`, background: scoreColor(t.score) }} />
                   </div>
-                </>
-              )}
+                  <span className="tier-stat mono">
+                    {t.score}% <span className="muted">· {t.fields_present}/{t.fields_total}</span>
+                  </span>
+                </div>
+              ))}
             </div>
-
-            <aside className="layout-side">
-              <h4>Selected ({selectedBoxIds.size})</h4>
-              {selectedBoxes.length === 0 ? (
-                <p className="muted">Click boxes on the page to add them.</p>
-              ) : (
-                <ul className="selected-list">
-                  {selectedBoxes.map((b) => (
-                    <li key={b.id}>
-                      <span className="badge" style={{ background: CATEGORY_COLOR[b.category] }}>{b.label}</span>
-                      <span>{b.text.slice(0, 80)}{b.text.length > 80 ? "…" : ""}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-
-              <div className="ner-controls">
-                <label>
-                  Preset:{" "}
-                  <select value={preset} onChange={(e) => setPreset(e.target.value)}>
-                    {Object.keys(presets).map((p) => (
-                      <option key={p} value={p}>
-                        {p} ({Object.keys(presets[p]).length} labels)
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button onClick={nerOnSelected} disabled={busy !== null || selectedBoxes.length === 0}>
-                  Run NER on selection
-                </button>
-              </div>
-
-              {selectedText && (
-                <details>
-                  <summary>Combined text ({selectedText.length} ch)</summary>
-                  <pre className="section-text">{selectedText}</pre>
-                </details>
-              )}
-
-              {Object.entries(perKey)
-                .filter(([k]) => k.startsWith(`p${pageNo}_`))
-                .map(([k, ents]) => (
-                  <div key={k} className="ner-result">
-                    <h5>{k} — {ents.length} entities</h5>
-                    <table>
-                      <tbody>
-                        {ents.map((e, i) => (
-                          <tr key={i}>
-                            <td><code>{e.label}</code></td>
-                            <td>{e.text}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ))}
-            </aside>
           </div>
         </div>
-      )}
 
-      {mode === "sections" && (
-        <div className="card">
-          <div className="explorer">
-            <aside className="sections-list">
-              <ul>
-                {sections.map((s) => (
-                  <li
-                    key={s.id}
-                    className={selectedSecId === s.id ? "selected" : ""}
-                    onClick={() => setSelectedSecId(s.id)}
-                    style={{ paddingLeft: 4 + (s.level || 0) * 12 }}
-                  >
-                    <span className="heading">{s.heading || `(${s.label})`}</span>
-                    <span className="meta">
-                      {s.char_count} ch
-                      {s.page_start ? ` · p${s.page_start}` : ""}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </aside>
-            <main className="section-detail">
-              {!section ? (
-                <p className="muted">Pick a section.</p>
-              ) : (
-                <>
-                  <h3>{section.heading}</h3>
-                  <div className="ner-controls">
-                    <label>
-                      Preset:{" "}
-                      <select value={preset} onChange={(e) => setPreset(e.target.value)}>
-                        {Object.keys(presets).map((p) => (
-                          <option key={p} value={p}>{p}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <button onClick={nerOnSection} disabled={busy !== null}>Run NER</button>
-                  </div>
-                  <pre className="section-text">{section.text}</pre>
-                  {perKey[`s${section.id}`] && (
-                    <table>
-                      <tbody>
-                        {perKey[`s${section.id}`].map((e, i) => (
-                          <tr key={i}>
-                            <td><code>{e.label}</code></td>
-                            <td>{e.text}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </>
-              )}
-            </main>
-          </div>
-        </div>
-      )}
-
-      <div className="card">
-        <h3>Reconcile + emit XML</h3>
-        <p className="muted">
-          When happy with the per-region NER, save the snapshot and run the LLM agent.
-          The agent uses ORCID / ROR / OpenAlex / Crossref to disambiguate, then emits a
-          Crossref-ready metadata record.
-        </p>
         <div className="actions">
-          <button onClick={doSaveSnapshot} disabled={busy !== null || totalEntities === 0}>
-            Save entities snapshot
+          <button className="primary" onClick={fixAll} disabled={busy !== null || card.high_impact.length === 0}>
+            ⚡ Auto-fix everything ({card.high_impact.length} high-impact gaps)
           </button>
-          <button onClick={doReconcile} disabled={busy !== null || totalEntities === 0}>
-            Reconcile with LLM
+          <button onClick={generateXml} disabled={busy !== null || card.tiers[0].score < 80}>
+            Generate Crossref XML
           </button>
+          {xmlBuilt && (
+            <a className="btn" href={xmlDownloadUrl(subId)} target="_blank" rel="noreferrer">
+              Download XML ↓
+            </a>
+          )}
+          <span className="spacer" />
+          <Link className="btn ghost" to={`/inspect/${subId}`}>Inspect document →</Link>
         </div>
-        {metaText && (
+        {busy && <p className="muted loading" style={{ marginTop: 12 }}>{busy}</p>}
+        {err && <p className="error" style={{ marginTop: 12 }}>{err}</p>}
+        {toast && <p className="toast">{toast}</p>}
+      </div>
+
+      {/* ── GAP BUCKETS ────────────────────────────────────────────── */}
+      <div className="gaps-grid">
+        <GapBucket
+          title="High impact"
+          subtitle="Auto-fixable from facts or free APIs"
+          tone="ok"
+          fields={card.high_impact}
+          onFix={fixOne}
+          busy={busy !== null}
+        />
+        <GapBucket
+          title="Medium impact"
+          subtitle="We have a candidate; you confirm"
+          tone="warn"
+          fields={card.medium}
+          onFix={fixOne}
+          busy={busy !== null}
+        />
+        <GapBucket
+          title="Needs you"
+          subtitle="Publisher policy fields — not extractable"
+          tone="info"
+          fields={card.manual}
+          onFix={fixOne}
+          busy={busy !== null}
+          noFix
+        />
+      </div>
+
+      {/* ── WHAT WE FOUND ──────────────────────────────────────────── */}
+      <div className="card">
+        <h2 className="card-title">What we found</h2>
+        <p className="card-subtitle">
+          Pulled deterministically from the PDF — no LLM cost. The reconciler trusts these and won't overwrite them.
+        </p>
+        <div className="found-grid">
+          {Object.entries(card.facts_summary).map(([k, v]) => (
+            <div key={k} className="found-row">
+              <span className="found-key mono">{k}</span>
+              <span className="found-val">
+                {v === null || v === undefined ? <span className="muted">—</span>
+                  : typeof v === "boolean" ? (v ? "✓ yes" : "no")
+                  : String(v)}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── METADATA EDITOR (collapsible) ──────────────────────────── */}
+      <div className="card">
+        <div className="row">
+          <h2 className="card-title" style={{ margin: 0 }}>Metadata JSON</h2>
+          <div className="cluster">
+            <button className="ghost" onClick={loadMetadata}>Load current</button>
+            <button onClick={premiumReconcile} disabled={busy !== null}>
+              Reconcile with LLM agent (premium)
+            </button>
+          </div>
+        </div>
+        <p className="card-subtitle">
+          Optional. The auto-fixers above already build this for you. The LLM agent is for harder
+          judgement calls (ambiguous ROR matches, reference disambiguation) — every call is logged
+          to the cost ledger.
+        </p>
+        {showMeta && (
           <>
-            <h4>Metadata</h4>
             <textarea
               className="json-editor"
               value={metaText}
@@ -472,17 +303,67 @@ export default function Review() {
               spellCheck={false}
             />
             <div className="actions">
-              <button onClick={saveMetadata}>Save metadata</button>
-              <button onClick={generateXml}>Generate Crossref XML</button>
-              {xmlBuilt && (
-                <a href={xmlDownloadUrl(subId)} target="_blank" rel="noreferrer">
-                  Download XML
-                </a>
-              )}
+              <button onClick={saveMetaEdits} disabled={busy !== null}>Save edits</button>
             </div>
           </>
         )}
       </div>
     </section>
+  );
+}
+
+// ============================================================================
+
+function GapBucket({
+  title, subtitle, tone, fields, onFix, busy, noFix,
+}: {
+  title: string;
+  subtitle: string;
+  tone: "ok" | "warn" | "info";
+  fields: FieldScore[];
+  onFix: (action: string) => void;
+  busy: boolean;
+  noFix?: boolean;
+}) {
+  return (
+    <div className={`card gap-bucket gap-${tone}`}>
+      <div className="row" style={{ marginBottom: 6 }}>
+        <h3 style={{ textTransform: "none", letterSpacing: 0, color: "var(--fg-primary)", fontSize: 14 }}>
+          {title}
+        </h3>
+        <span className="status" data-tone={tone}>{fields.length}</span>
+      </div>
+      <p className="muted small" style={{ marginBottom: 12 }}>{subtitle}</p>
+      {fields.length === 0 ? (
+        <p className="muted small">Nothing in this bucket — nice.</p>
+      ) : (
+        <ul className="gap-list">
+          {fields.map((f) => (
+            <li key={f.key} className="gap-item">
+              <div className="gap-info">
+                <div className="gap-label">
+                  {f.label}
+                  <span className="status" style={{ marginLeft: 8 }}>{f.tier}</span>
+                </div>
+                <div className="muted small gap-why">{f.why}</div>
+                {f.value_preview && (
+                  <div className="muted small mono" style={{ marginTop: 2 }}>{f.value_preview}</div>
+                )}
+              </div>
+              {!noFix && f.autofix_action && (
+                <button
+                  className="primary"
+                  disabled={busy}
+                  onClick={() => onFix(f.autofix_action!)}
+                  title={`action: ${f.autofix_action}`}
+                >
+                  Fix
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

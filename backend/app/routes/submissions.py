@@ -1,9 +1,12 @@
 import json
+import logging
 import shutil
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Body, File, HTTPException, UploadFile
+
+log = logging.getLogger("submissions")
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlmodel import select
@@ -60,6 +63,52 @@ def get_submission(sub_id: int) -> SubmissionOut:
         return SubmissionOut(id=sub.id, filename=sub.filename, status=sub.status, error=sub.error)
 
 
+@router.delete("/{sub_id}")
+def delete_submission(sub_id: int):
+    """Remove a submission: DB row, uploaded file, and all generated artefacts."""
+    with get_session() as s:
+        sub = s.get(Submission, sub_id)
+        if not sub:
+            raise HTTPException(404, "not found")
+        paths_to_remove = [
+            sub.upload_path,
+            sub.docling_json_path,
+            sub.layout_json_path,
+            sub.entities_json_path,
+            sub.metadata_json_path,
+            sub.crossref_xml_path,
+        ]
+        outputs = settings.data_dir / "outputs"
+        # Files we generate by convention but don't track in DB
+        paths_to_remove += [
+            str(outputs / f"{sub_id}_factsheet.json"),
+            str(outputs / f"{sub_id}_cost.json"),
+        ]
+        # Page images live in a directory of their own
+        pages_dir = outputs / f"{sub_id}_pages"
+
+        removed = 0
+        for p in paths_to_remove:
+            if not p:
+                continue
+            try:
+                Path(p).unlink(missing_ok=True)
+                removed += 1
+            except Exception as exc:
+                log.warning("could not remove %s: %s", p, exc)
+        if pages_dir.exists():
+            try:
+                shutil.rmtree(pages_dir)
+                removed += 1
+            except Exception as exc:
+                log.warning("could not remove %s: %s", pages_dir, exc)
+
+        s.delete(sub)
+        s.commit()
+
+    return {"ok": True, "removed_paths": removed}
+
+
 # --- Sections (Docling layout) ---------------------------------------------
 
 @router.get("/{sub_id}/sections")
@@ -98,6 +147,132 @@ def get_markdown(sub_id: int):
             raise HTTPException(404, "not parsed yet")
         doc = json.loads(Path(sub.docling_json_path).read_text())
     return {"markdown": doc.get("markdown") or "", "text": doc.get("text") or ""}
+
+
+# --- Factsheet (deterministic L0 + L2 + L3 extraction) ---------------------
+
+def _load_factsheet(sub_id: int):
+    from ..services.factsheet import Factsheet
+    fs_path = settings.data_dir / "outputs" / f"{sub_id}_factsheet.json"
+    if not fs_path.exists():
+        raise HTTPException(404, "factsheet not built (re-parse this submission)")
+    return Factsheet.model_validate_json(fs_path.read_text())
+
+
+def _load_metadata(sub_id: int) -> dict:
+    """Load saved metadata if present, else return empty dict."""
+    with get_session() as s:
+        sub = s.get(Submission, sub_id)
+        if sub and sub.metadata_json_path and Path(sub.metadata_json_path).exists():
+            return json.loads(Path(sub.metadata_json_path).read_text())
+    return {}
+
+
+def _save_metadata(sub_id: int, meta: dict) -> Path:
+    path = settings.data_dir / "outputs" / f"{sub_id}_metadata.json"
+    path.write_text(json.dumps(meta, indent=2, default=str))
+    with get_session() as s:
+        sub = s.get(Submission, sub_id)
+        if sub:
+            sub.metadata_json_path = str(path)
+            sub.updated_at = datetime.utcnow()
+            s.add(sub)
+            s.commit()
+    return path
+
+
+@router.get("/{sub_id}/factsheet")
+def get_factsheet(sub_id: int):
+    fs_path = settings.data_dir / "outputs" / f"{sub_id}_factsheet.json"
+    if not fs_path.exists():
+        raise HTTPException(404, "factsheet not built (re-parse this submission)")
+    return JSONResponse(json.loads(fs_path.read_text()))
+
+
+# --- Scorecard -------------------------------------------------------------
+
+@router.get("/{sub_id}/score")
+def get_score(sub_id: int):
+    from ..services.scoring import score
+    fs = _load_factsheet(sub_id)
+    meta = _load_metadata(sub_id)
+    return score(fs, meta).model_dump()
+
+
+# --- Per-field auto-fix ----------------------------------------------------
+
+class AutofixRequest(BaseModel):
+    action: str
+
+
+@router.post("/{sub_id}/autofix")
+def post_autofix(sub_id: int, req: AutofixRequest):
+    from ..services.autofix import run_autofix
+    from ..services.scoring import score
+
+    fs = _load_factsheet(sub_id)
+    meta = _load_metadata(sub_id)
+
+    with get_session() as s:
+        sub = s.get(Submission, sub_id)
+        if not sub or not sub.docling_json_path:
+            raise HTTPException(404, "not parsed yet")
+        docling_doc = json.loads(Path(sub.docling_json_path).read_text())
+
+    report = run_autofix(req.action, meta, fs, docling_doc)
+    _save_metadata(sub_id, meta)
+    new_score = score(fs, meta)
+    return {"report": report, "score": new_score.model_dump()}
+
+
+# --- "Fix everything we can" ------------------------------------------------
+
+@router.post("/{sub_id}/autofix/all")
+def post_autofix_all(sub_id: int):
+    from ..services.autofix import run_autofix
+    from ..services.scoring import score, RUBRIC
+
+    fs = _load_factsheet(sub_id)
+    meta = _load_metadata(sub_id)
+
+    with get_session() as s:
+        sub = s.get(Submission, sub_id)
+        if not sub or not sub.docling_json_path:
+            raise HTTPException(404, "not parsed yet")
+        docling_doc = json.loads(Path(sub.docling_json_path).read_text())
+
+    actions_done: list[dict] = []
+    seen: set[str] = set()
+    for fd in RUBRIC:
+        if fd.bucket != "high" or not fd.autofix_action or fd.autofix_action in seen:
+            continue
+        seen.add(fd.autofix_action)
+        actions_done.append(run_autofix(fd.autofix_action, meta, fs, docling_doc))
+
+    _save_metadata(sub_id, meta)
+    new_score = score(fs, meta)
+    sub_status_to_ready(sub_id)
+    return {"reports": actions_done, "score": new_score.model_dump()}
+
+
+def sub_status_to_ready(sub_id: int) -> None:
+    with get_session() as s:
+        sub = s.get(Submission, sub_id)
+        if sub and sub.status == "parsed":
+            sub.status = "ready"
+            sub.updated_at = datetime.utcnow()
+            s.add(sub)
+            s.commit()
+
+
+# --- LLM cost ledger -------------------------------------------------------
+
+@router.get("/{sub_id}/cost")
+def get_cost(sub_id: int):
+    ledger_path = settings.data_dir / "outputs" / f"{sub_id}_cost.json"
+    if not ledger_path.exists():
+        return {"calls": [], "total_usd": 0.0, "total_input_tokens": 0, "total_output_tokens": 0}
+    return JSONResponse(json.loads(ledger_path.read_text()))
 
 
 # --- Layout (PDF page images + bounding boxes) -----------------------------
@@ -208,7 +383,7 @@ def reconcile(sub_id: int):
         doc = json.loads(Path(sub.docling_json_path).read_text())
         ents = json.loads(Path(sub.entities_json_path).read_text())
 
-    metadata = reconcile_metadata(doc, ents)
+    metadata = reconcile_metadata(doc, ents, sub_id=sub_id)
     meta_path = settings.data_dir / "outputs" / f"{sub_id}_metadata.json"
     meta_path.write_text(metadata.model_dump_json(indent=2))
     with get_session() as s:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Any
 
 from openai import OpenAI
@@ -14,6 +15,7 @@ from openai import OpenAI
 from ..config import settings
 from ..models import JournalArticleMetadata
 from .enrichers import CrossrefClient, OpenAlexClient, ORCIDClient, RORClient
+from .llm_router import _append_ledger, _estimate_cost
 
 log = logging.getLogger("agent")
 
@@ -208,9 +210,12 @@ def _build_user_message(docling_doc: dict, entities: dict) -> str:
     )
 
 
-def reconcile_metadata(docling_doc: dict, entities: dict) -> JournalArticleMetadata:
+def reconcile_metadata(docling_doc: dict, entities: dict, sub_id: int | None = None) -> JournalArticleMetadata:
     client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
     tools = _ToolBox()
+
+    ledger_path = (settings.data_dir / "outputs" / f"{sub_id}_cost.json") if sub_id is not None else None
+    model = settings.openai_model
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -220,7 +225,7 @@ def reconcile_metadata(docling_doc: dict, entities: dict) -> JournalArticleMetad
     last_content: str | None = None
     for step in range(MAX_ITERATIONS):
         resp = client.chat.completions.create(
-            model=settings.openai_model,
+            model=model,
             messages=messages,
             tools=TOOLS,
             tool_choice="auto",
@@ -228,6 +233,21 @@ def reconcile_metadata(docling_doc: dict, entities: dict) -> JournalArticleMetad
         )
         msg = resp.choices[0].message
         messages.append(msg.model_dump(exclude_none=True))
+
+        # Cost tracking — records every iteration of the agent loop.
+        if ledger_path is not None and resp.usage is not None:
+            in_tok  = resp.usage.prompt_tokens
+            out_tok = resp.usage.completion_tokens
+            usd = _estimate_cost(model, in_tok, out_tok)
+            _append_ledger(ledger_path, {
+                "ts": datetime.utcnow().isoformat(timespec="seconds"),
+                "task": f"reconcile_iter_{step}",
+                "model": model,
+                "in_tokens": in_tok,
+                "out_tokens": out_tok,
+                "usd": round(usd, 6),
+                "clipped": False,
+            })
 
         if msg.tool_calls:
             for tc in msg.tool_calls:
