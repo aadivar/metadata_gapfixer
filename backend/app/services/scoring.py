@@ -292,12 +292,15 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
         if not authors:
             return (False, "no authors yet — extract those first")
         with_aff = sum(1 for a in authors if (a.get("affiliations") or []))
-        unique_affs = set()
+        unique_affs: set[str] = set()
         for a in authors:
             for aff in (a.get("affiliations") or []):
-                unique_affs.add(aff.strip())
-        unique_affs.update(s.strip() for s in fs.affiliations.values())
-        unique_affs = {a for a in unique_affs if a}
+                if aff and aff.strip():
+                    unique_affs.add(aff.strip())
+        # Only fall back to factsheet affiliations if metadata authors
+        # have nothing — otherwise we double-count.
+        if not unique_affs:
+            unique_affs.update(s.strip() for s in fs.affiliations.values() if s and s.strip())
         if not unique_affs:
             return (False, "0 affiliations parsed")
         ok = with_aff == len(authors)
@@ -318,23 +321,31 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
         return (with_orcid == len(authors), f"{with_orcid}/{len(authors)} have ORCID")
     if field == "ror_for_all_affiliations":
         authors = _v("authors") or [a.model_dump() for a in fs.authors]
-        # Count unique affiliation STRINGS (not per-author dups)
-        unique_affs: set[str] = set()
+        # Map each unique affiliation STRING → did any author resolve it
+        # to a ROR? (Multiple authors at the same institution share both
+        # the string and the ROR — counting either side without dedup
+        # would double-count.)
+        aff_has_ror: dict[str, bool] = {}
         for a in authors:
-            for aff in (a.get("affiliations") or []):
-                if aff and aff.strip():
-                    unique_affs.add(aff.strip())
-        unique_affs.update(s.strip() for s in fs.affiliations.values() if s and s.strip())
-        if not unique_affs:
+            affs = a.get("affiliations") or []
+            rors = a.get("ror_ids") or []
+            for j, aff in enumerate(affs):
+                key = (aff or "").strip()
+                if not key:
+                    continue
+                ror = rors[j] if j < len(rors) else None
+                aff_has_ror[key] = bool(ror) or aff_has_ror.get(key, False)
+        if not aff_has_ror:
+            # Fall back to the factsheet's affiliations only if metadata
+            # has none — otherwise the metadata authors are authoritative.
+            for s in fs.affiliations.values():
+                if s and s.strip():
+                    aff_has_ror[s.strip()] = False
+        if not aff_has_ror:
             return (False, "no affiliations to resolve")
-        # Count unique RORs across all authors
-        unique_rors: set[str] = set()
-        for a in authors:
-            for r in (a.get("ror_ids") or []):
-                if r:
-                    unique_rors.add(r)
-        ok = len(unique_rors) >= len(unique_affs)
-        return (ok, f"{len(unique_rors)}/{len(unique_affs)} affiliations have ROR")
+        n_affs = len(aff_has_ror)
+        n_resolved = sum(1 for v in aff_has_ror.values() if v)
+        return (n_resolved == n_affs, f"{n_resolved}/{n_affs} affiliations have ROR")
     if field == "references_with_doi":
         refs = _v("references") or []
         if not refs:
@@ -596,20 +607,26 @@ def _compute_research_nexus(fs: Factsheet, meta: dict) -> ResearchNexus:
                    "partial" if n_funders_doi > 0 else "empty",
         )
 
-    # Organizations — fraction of unique affiliations resolved to a ROR
-    unique_affs: set[str] = set()
+    # Organizations — fraction of unique affiliation STRINGS that have a
+    # ROR linked. Multiple authors at the same institution share both the
+    # affiliation string and the ROR, so we walk authors and dedupe on
+    # the affiliation string. We do NOT mix in fs.affiliations.values()
+    # any more — when meta["authors"] is populated, that's the authoritative
+    # source; otherwise fall back to the factsheet authors (above).
+    aff_has_ror: dict[str, bool] = {}
     for a in authors:
-        for aff in (a.get("affiliations") or []):
-            if aff and aff.strip():
-                unique_affs.add(aff.strip())
-    unique_affs.update(s.strip() for s in fs.affiliations.values() if s and s.strip())
-    unique_rors: set[str] = set()
-    for a in authors:
-        for r in (a.get("ror_ids") or []):
-            if r:
-                unique_rors.add(r)
-    n_affs = len(unique_affs)
-    n_rors = len(unique_rors)
+        affs = a.get("affiliations") or []
+        rors = a.get("ror_ids") or []
+        for j, aff in enumerate(affs):
+            key = (aff or "").strip()
+            if not key:
+                continue
+            ror = rors[j] if j < len(rors) else None
+            # Once we've seen any author resolve this affiliation to a ROR,
+            # treat it as resolved — don't let a later None overwrite True.
+            aff_has_ror[key] = bool(ror) or aff_has_ror.get(key, False)
+    n_affs = len(aff_has_ror)
+    n_resolved = sum(1 for v in aff_has_ror.values() if v)
     if n_affs == 0:
         orgs_pillar = NexusPillar(
             key="organizations", label="Organizations (ROR)",
@@ -618,13 +635,12 @@ def _compute_research_nexus(fs: Factsheet, meta: dict) -> ResearchNexus:
             status="not_applicable",
         )
     else:
-        ror_progress = min(n_rors, n_affs)
         orgs_pillar = NexusPillar(
             key="organizations", label="Organizations (ROR)",
-            numerator=ror_progress, denominator=n_affs,
-            caption=f"{ror_progress}/{n_affs} unique affiliations linked to ROR",
-            status="complete" if ror_progress == n_affs else
-                   "partial" if ror_progress > 0 else "empty",
+            numerator=n_resolved, denominator=n_affs,
+            caption=f"{n_resolved}/{n_affs} unique affiliations linked to ROR",
+            status="complete" if n_resolved == n_affs else
+                   "partial" if n_resolved > 0 else "empty",
         )
 
     # Outputs — fraction of references that have a DOI (cited-by linking)
