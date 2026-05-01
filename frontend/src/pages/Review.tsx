@@ -5,6 +5,8 @@ import {
   autofixAll,
   buildXml,
   confirmField,
+  Dimension,
+  DimensionScore,
   enrichAll,
   FieldScore,
   getCost,
@@ -13,12 +15,12 @@ import {
   getPageBoxes,
   getScore,
   LayoutBox,
-  locateAuthorsAffiliations,
   locateField,
   pageImageUrl,
   PageInfo,
   putMetadata,
   rejectField,
+  runStructurer,
   Scorecard,
   Tier,
   xmlDownloadUrl,
@@ -40,25 +42,30 @@ import type { ComponentType, SVGProps } from "react";
 type IconType = ComponentType<SVGProps<SVGSVGElement> & { size?: number }>;
 
 const TIER_DESCRIPTION: Record<Tier, string> = {
-  T0: "Crossref schema 5.4.0 — required to deposit.",
-  T1: "Crossref recommended — what makes the record usable for indexers.",
-  T2: "Crossref Participation / Nexus benchmarks — cross-system linking.",
-  T3: "Crossref+DataCite integrity guide — what makes this record trustable.",
+  T0: "Crossref mandatory — DOI, title, author, date, target URL.",
+  T1: "Rich bibliographic metadata.",
+  T2: "Research Nexus connections.",
+  T3: "Integrity signals.",
 };
 
-const TIER_ORDER: Tier[] = ["T0", "T1", "T2", "T3"];
+// Order of the buckets in the page: Mandatory first (deposit gate), then
+// the five Research Nexus dimensions in nexus-score's order.
+const DIMENSION_ORDER: Dimension[] = [
+  "mandatory", "provenance", "people", "funding", "access", "organizations",
+];
 
-// Fields owned by the Authors & Affiliations supercard at the top.
-// We hide these from the per-tier rendering so the editor doesn't see the
-// same person/affiliation data repeated in five places.
-const SUPERCARD_OWNED_KEYS = new Set<string>([
-  "authors_any",
-  "full_author_names",
-  "affiliations_listed",
-  "orcid_for_corresponding",
-  "orcid_for_all_authors",
-  "ror_for_all_affiliations",
-]);
+// Map the backend's entity-count pillars onto the dimension that owns them,
+// so each dimension section can show its own underlying progress (e.g.
+// People shows "7/9 authors with ORCID" inside its header).
+const PILLAR_TO_DIM: Record<string, Dimension> = {
+  researchers:   "people",
+  funders:       "funding",
+  organizations: "organizations",
+  outputs:       "provenance",
+};
+
+
+const TIER_ORDER: Tier[] = ["T0", "T1", "T2", "T3"];
 
 const HIGH_CONF = 0.9;
 
@@ -157,6 +164,34 @@ export default function Review() {
     finally { setBusy(null); }
   }
 
+  async function runStructure(field: FieldScore) {
+    if (!field.structurer_task) return;
+    const cost = field.ai_cost_estimate ?? 0;
+    const ok = window.confirm(
+      `Run AI structurer "${field.structurer_task}" for "${field.label}"?\n\n` +
+      `This is a paid LLM call. Estimated cost: ~$${cost.toFixed(4)}.`
+    );
+    if (!ok) return;
+    setBusy(`Running ${field.structurer_task}…`);
+    try {
+      const res = await runStructurer(subId, field.structurer_task);
+      if (res?.score) setCard(res.score);
+      const co = await getCost(subId).catch(() => null);
+      if (co) setCost(co);
+      const r = (res && res.report) || {};
+      if (r.ok === false) {
+        setErr(`${field.structurer_task} returned: ${r.error || "no result"}`);
+        return;
+      }
+      const summary = Object.entries(r)
+        .filter(([k, v]) => k !== "ok" && k !== "task" && typeof v !== "object")
+        .map(([k, v]) => `${k}=${v}`)
+        .join(" · ");
+      showToast(`${field.structurer_task} complete · ${summary || "see metadata"}`);
+    } catch (e) { setErr(String(e)); }
+    finally { setBusy(null); }
+  }
+
   async function fixAll() {
     setBusy("Running all auto-fixes…");
     try {
@@ -187,7 +222,7 @@ export default function Review() {
     finally { setBusy(null); }
   }
 
-  async function confirm(field: FieldScore) {
+  async function handleConfirm(field: FieldScore) {
     const path = (field.metadata_paths || [])[0] || field.key;
     setBusy(`Confirming ${field.label}…`);
     try {
@@ -209,7 +244,44 @@ export default function Review() {
     finally { setBusy(null); }
   }
 
-  async function locate(field: FieldScore, page: number, boxIds: number[]) {
+  async function locate(field: FieldScore, page: number, boxIds: number[], joinedText?: string) {
+    const text = (joinedText ?? "").trim();
+    // For AI-leverage fields with a structurer task, the located text is fed
+    // straight to the LLM (so e.g. CRediT prose without an explicit heading
+    // can still be processed). Otherwise we use the regex-based locate path.
+    if (field.structurer_task && field.llm_leverage === "ai") {
+      if (!text) {
+        setErr("No text in the selected boxes — pick the paragraph that contains the contributions.");
+        throw new Error("empty selection");
+      }
+      const cost = field.ai_cost_estimate ?? 0;
+      const ok = window.confirm(
+        `Send the selected text (${text.length} chars) to the AI structurer ` +
+        `"${field.structurer_task}" for "${field.label}"?\n\n` +
+        `Estimated cost: ~$${cost.toFixed(4)}.`
+      );
+      if (!ok) throw new Error("cancelled");
+      setBusy(`Running ${field.structurer_task} on selection…`);
+      try {
+        const res = await runStructurer(subId, field.structurer_task!, { text_override: text });
+        if (res?.score) setCard(res.score);
+        const co = await getCost(subId).catch(() => null);
+        if (co) setCost(co);
+        const r = (res && res.report) || {};
+        if (r.ok) {
+          const summary = Object.entries(r)
+            .filter(([k, v]) => k !== "ok" && k !== "task" && typeof v !== "object")
+            .map(([k, v]) => `${k}=${v}`)
+            .join(" · ");
+          showToast(`${field.structurer_task} from selection · ${summary}`);
+        } else {
+          setErr(`${field.structurer_task} failed: ${r.error || "see report"}`);
+        }
+      } catch (e) { setErr(String(e)); throw e; }
+      finally { setBusy(null); }
+      return;
+    }
+
     const path = (field.metadata_paths || [])[0] || field.key;
     setBusy(`Saving location for ${field.label}…`);
     try {
@@ -250,44 +322,68 @@ export default function Review() {
     );
   }
 
-  // Group fields by tier in declared order — skip fields owned by the supercard
-  const fieldsByTier: Record<Tier, FieldScore[]> = { T0: [], T1: [], T2: [], T3: [] };
+  // Group fields by Research Nexus dimension. We no longer filter out the
+  // author/affiliation-related fields — they render as their own FieldCards
+  // inside the People & Organizations dimensions, with an inline
+  // AuthorsListView in the expanded panel so editors can review the
+  // extracted authors and their ORCIDs/RORs without hunting for the
+  // supercard. The supercard above stays as the combined-locate workflow.
+  const fieldsByDim: Record<Dimension, FieldScore[]> = {
+    mandatory: [], provenance: [], people: [], funding: [], access: [], organizations: [],
+  };
   card.fields.forEach((f) => {
-    if (SUPERCARD_OWNED_KEYS.has(f.key)) return;
-    fieldsByTier[f.tier].push(f);
+    const d = (f.dimension ?? "access") as Dimension;
+    fieldsByDim[d].push(f);
   });
+  const dimensionByKey: Record<string, DimensionScore> = {};
+  (card.dimensions || []).forEach((d) => { dimensionByKey[d.key] = d; });
 
   return (
     <section>
       <div className="page-header">
         <div className="crumbs"><Link to="/upload">Submissions</Link> / #{subId}</div>
         <div className="row">
-          <h1>Metadata gap report</h1>
+          <h1>Metadata Generator</h1>
           <span className="muted small mono">cost so far · ${cost.total_usd.toFixed(4)}</span>
         </div>
       </div>
 
-      {/* HERO */}
+      {/* HERO — Research Nexus score + Mandatory gate */}
       <div className="card scorecard-hero">
         <div className="hero-grid">
-          <div className="hero-score" style={{ borderColor: scoreColor(card.composite) }}>
-            <div className="hero-num" style={{ color: scoreColor(card.composite) }}>{card.composite}</div>
-            <div className="hero-den">/ 100</div>
+          <div className="hero-score" style={{ borderColor: scoreColor(card.research_nexus_score ?? card.composite) }}>
+            <div className="hero-num" style={{ color: scoreColor(card.research_nexus_score ?? card.composite) }}>
+              {card.research_nexus_score ?? card.composite}
+            </div>
+            <div className="hero-den">RESEARCH NEXUS</div>
           </div>
           <div className="hero-text">
             <h2 className="card-title" style={{ marginBottom: 8 }}>{card.interpretation}</h2>
+            <div className={`mandatory-banner ${card.mandatory_ready ? "is-ready" : "is-blocked"}`}>
+              <span className="mandatory-dot" />
+              <strong>Mandatory:</strong>
+              <span className="muted small mono">{card.mandatory_present ?? 0}/{card.mandatory_total ?? 0} fields</span>
+              <span className="mandatory-status">
+                {card.mandatory_ready ? "Depositable" : "Not yet depositable"}
+              </span>
+            </div>
             <div className="tier-bars">
-              {card.tiers.map((t) => (
-                <div key={t.tier} className="tier-row" title={TIER_DESCRIPTION[t.tier]}>
-                  <span className="tier-name"><strong>{t.tier}</strong> {t.label}</span>
-                  <div className="tier-track">
-                    <div className="tier-fill" style={{ width: `${t.score}%`, background: scoreColor(t.score) }} />
+              {(card.dimensions || [])
+                .filter((d) => d.weight > 0)   // skip Mandatory bar (gate, not dimension)
+                .map((d) => (
+                  <div key={d.key} className="tier-row" title={d.description}>
+                    <span className="tier-name">
+                      <strong>{d.label}</strong>
+                      <span className="muted small mono"> · {d.weight}% wt</span>
+                    </span>
+                    <div className="tier-track">
+                      <div className="tier-fill" style={{ width: `${d.score}%`, background: scoreColor(d.score) }} />
+                    </div>
+                    <span className="tier-stat mono">
+                      {d.score}% <span className="muted">· {d.fields_present}/{d.fields_total}</span>
+                    </span>
                   </div>
-                  <span className="tier-stat mono">
-                    {t.score}% <span className="muted">· {t.fields_present}/{t.fields_total}</span>
-                  </span>
-                </div>
-              ))}
+                ))}
             </div>
           </div>
         </div>
@@ -300,7 +396,7 @@ export default function Review() {
               Run AI enrichment<span className="btn-meta">~${(card.estimated_full_enrichment_usd ?? 0).toFixed(4)}</span>
             </button>
           )}
-          <button onClick={generateXml} disabled={busy !== null || card.tiers[0].score < 80}>
+          <button onClick={generateXml} disabled={busy !== null || !card.mandatory_ready}>
             Generate Crossref XML
           </button>
           {xmlBuilt && <a className="btn" href={xmlDownloadUrl(subId)} target="_blank" rel="noreferrer">Download XML</a>}
@@ -310,52 +406,113 @@ export default function Review() {
         {toast && <p className="toast">{toast}</p>}
       </div>
 
-      {/* COMBINED AUTHORS + AFFILIATIONS SUPERCARD (T1) */}
-      <AuthorsAffiliationsSuperCard
-        subId={subId}
-        card={card}
-        busy={busy !== null}
-        onUpdate={async () => { await refresh(); }}
-        showToast={showToast}
-        setBusy={setBusy}
-        setErr={setErr}
-      />
-
-      {/* PER-TIER FIELD CARDS */}
-      {TIER_ORDER.map((tier) => {
-        const fields = fieldsByTier[tier];
-        if (fields.length === 0) return null;
-        const tinfo = card.tiers.find((t) => t.tier === tier)!;
-        return (
-          <div key={tier} className="card tier-section">
-            <div className="row" style={{ marginBottom: 16 }}>
-              <div>
-                <h2 className="card-title" style={{ margin: 0 }}>
-                  <span className="tier-badge">{tier}</span> {tinfo.label}
-                </h2>
-                <p className="muted small" style={{ margin: "4px 0 0" }}>{TIER_DESCRIPTION[tier]}</p>
-              </div>
-              <span className="mono small" style={{ color: scoreColor(tinfo.score) }}>
-                {tinfo.score}% · {tinfo.fields_present}/{tinfo.fields_total}
+      {/* DIMENSION NAV — sticky strip linking to each bucket */}
+      <nav className="tier-nav" aria-label="Jump to dimension">
+        {DIMENSION_ORDER.map((dim) => {
+          const d = dimensionByKey[dim];
+          if (!d || fieldsByDim[dim].length === 0) return null;
+          return (
+            <a key={dim} href={`#dim-${dim}`} className="tier-nav-item">
+              <span className="tier-nav-code">{dim === "mandatory" ? "GATE" : `${d.weight}%`}</span>
+              <span className="tier-nav-label">{d.label}</span>
+              <span className="tier-nav-score mono" style={{ color: scoreColor(d.score) }}>
+                {d.score}%
               </span>
-            </div>
-            <div className="field-cards">
-              {fields.map((f) => (
-                <FieldCard
-                  key={f.key}
-                  subId={subId}
-                  field={f}
-                  expanded={expanded.has(f.key)}
-                  onToggleExpand={() => toggleExpand(f.key)}
-                  onConfirm={() => confirm(f)}
-                  onReject={() => reject(f)}
-                  onAutofix={f.autofix_action ? () => fixOne(f.autofix_action!) : undefined}
-                  onLocate={(page, boxIds) => locate(f, page, boxIds)}
-                  busy={busy !== null}
-                />
-              ))}
-            </div>
-          </div>
+            </a>
+          );
+        })}
+      </nav>
+
+      {/* PER-DIMENSION FIELD CARDS */}
+      {DIMENSION_ORDER.map((dim) => {
+        const fields = fieldsByDim[dim];
+        const d = dimensionByKey[dim];
+        if (!d || fields.length === 0) return null;
+        const isMandatory = dim === "mandatory";
+        const todo = fields.filter((f) => deriveState(f) !== "confirmed");
+        const done = fields.filter((f) => deriveState(f) === "confirmed");
+
+        // Find the entity-count pillar that this dimension owns (if any)
+        const pillar = (card.research_nexus?.pillars || []).find(
+          (p) => PILLAR_TO_DIM[p.key] === dim
+        );
+        const pillarPct = pillar && pillar.denominator > 0
+          ? Math.round((100 * pillar.numerator) / pillar.denominator)
+          : 0;
+
+        const renderField = (f: FieldScore) => (
+          <FieldCard
+            key={f.key}
+            subId={subId}
+            field={f}
+            expanded={expanded.has(f.key)}
+            onToggleExpand={() => toggleExpand(f.key)}
+            onConfirm={() => handleConfirm(f)}
+            onReject={() => reject(f)}
+            onAutofix={f.autofix_action ? () => fixOne(f.autofix_action!) : undefined}
+            onRunStructurer={f.structurer_task ? () => runStructure(f) : undefined}
+            onLocate={(page, boxIds, joinedText) => locate(f, page, boxIds, joinedText)}
+            busy={busy !== null}
+          />
+        );
+
+        return (
+          <section key={dim} id={`dim-${dim}`} className={`tier-section dim-section dim-${dim} ${isMandatory ? "dim-mandatory" : ""}`}>
+            <header className="tier-header">
+              <div className="tier-header-left">
+                <span className={`tier-code ${isMandatory ? "tier-code-gate" : ""}`}>
+                  {isMandatory ? "GATE" : `${d.weight}%`}
+                </span>
+                <div>
+                  <h2 className="tier-title">{d.label}</h2>
+                  <p className="tier-desc muted small">{d.description}</p>
+                </div>
+              </div>
+              <div className="tier-header-right">
+                <div className="tier-score-block">
+                  <span className="tier-score-num mono" style={{ color: scoreColor(d.score) }}>
+                    {d.score}<span className="tier-score-pct">%</span>
+                  </span>
+                  <span className="muted small mono">
+                    {d.fields_present}/{d.fields_total} fields
+                  </span>
+                </div>
+                <div className="tier-track-lg">
+                  <div className="tier-fill-lg" style={{ width: `${d.score}%`, background: scoreColor(d.score) }} />
+                </div>
+              </div>
+            </header>
+
+            {pillar && (
+              <div className={`dim-pillar nexus-${pillar.status}`} title={pillar.caption}>
+                <span className="nexus-dot" />
+                <div className="dim-pillar-body">
+                  <div className="dim-pillar-row-top">
+                    <span className="dim-pillar-caption">{pillar.caption}</span>
+                    <span className="dim-pillar-frac mono small">
+                      {pillar.denominator > 0 ? `${pillar.numerator}/${pillar.denominator}` : "—"}
+                    </span>
+                  </div>
+                  <div className="nexus-pillar-track">
+                    <div className="nexus-pillar-fill" style={{ width: `${pillarPct}%` }} />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {todo.length > 0 && (
+              <div className="tier-bucket">
+                <h4 className="tier-bucket-title">Needs attention <span className="muted small mono">{todo.length}</span></h4>
+                <div className="field-cards">{todo.map(renderField)}</div>
+              </div>
+            )}
+            {done.length > 0 && (
+              <div className="tier-bucket">
+                <h4 className="tier-bucket-title">Confirmed <span className="muted small mono">{done.length}</span></h4>
+                <div className="field-cards">{done.map(renderField)}</div>
+              </div>
+            )}
+          </section>
         );
       })}
 
@@ -385,8 +542,168 @@ export default function Review() {
 
 // ============================================================================
 
+function CreditContributionsView({ subId }: { subId: number }) {
+  const [contribs, setContribs] = useState<any[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const m = await getMetadata(subId);
+        setContribs(m.credit_contributions || []);
+      } catch (e) {
+        setErr(String(e));
+      }
+    })();
+  }, [subId]);
+
+  if (err) return <p className="error" style={{ marginTop: 8 }}>{err}</p>;
+  if (contribs === null) return <p className="muted small loading">Loading contributions</p>;
+  if (contribs.length === 0) {
+    return <p className="muted small" style={{ marginTop: 8 }}>No contributions on metadata yet.</p>;
+  }
+
+  const totalRoles = contribs.reduce((acc: number, c: any) => acc + (c.roles?.length ?? 0), 0);
+
+  return (
+    <div className="credit-contribs" style={{ marginTop: 10 }}>
+      <h5 style={{ marginBottom: 6 }}>
+        {contribs.length} contributors · {totalRoles} CRediT roles
+      </h5>
+      <ul className="credit-author-rows">
+        {contribs.map((c: any, i: number) => (
+          <li key={i} className="credit-author-row">
+            <div className="credit-author-head">
+              <span className="credit-author-name">{c.author_name || "(unnamed)"}</span>
+              {c.author_initials && <span className="chip credit-initials">{c.author_initials}</span>}
+            </div>
+            {(c.roles && c.roles.length > 0) ? (
+              <ul className="credit-role-rows">
+                {c.roles.map((r: any, j: number) => (
+                  <li key={j} className="credit-role-row">
+                    <span className="chip chip-credit">{r.role}</span>
+                    {r.evidence && (
+                      <span className="muted small credit-evidence">"{r.evidence}"</span>
+                    )}
+                    {typeof r.confidence === "number" && (
+                      <span className="muted small mono">{Math.round(r.confidence * 100)}%</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="muted small" style={{ marginLeft: 16 }}>(no roles assigned)</p>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+type AuthorsListMode = "full_names" | "orcid_corresponding" | "orcid_all" | "affiliations" | "ror";
+function AuthorsListView({ subId, mode }: { subId: number; mode: AuthorsListMode }) {
+  const [authors, setAuthors] = useState<any[] | null>(null);
+  const [provenance, setProvenance] = useState<Record<string, any>>({});
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const m = await getMetadata(subId);
+        setAuthors(m.authors || []);
+        setProvenance(m.provenance || {});
+      } catch (e) { setErr(String(e)); }
+    })();
+  }, [subId]);
+
+  if (err) return <p className="error" style={{ marginTop: 8 }}>{err}</p>;
+  if (authors === null) return <p className="muted small loading">Loading authors</p>;
+  if (authors.length === 0) {
+    return <p className="muted small" style={{ marginTop: 8 }}>No authors on metadata yet.</p>;
+  }
+
+  const visible = mode === "orcid_corresponding"
+    ? authors.filter((a: any) => a.is_corresponding)
+    : authors;
+  if (visible.length === 0) {
+    return <p className="muted small" style={{ marginTop: 8 }}>No corresponding author marked.</p>;
+  }
+
+  return (
+    <ol className="author-rows" style={{ marginTop: 8 }}>
+      {visible.map((a: any, i: number) => {
+        const idx = authors.indexOf(a);
+        const prov = provenance[`authors[${idx}]`] || {};
+        const evidence: string[] = prov.evidence_chain || [];
+        const showOrcid = mode === "orcid_corresponding" || mode === "orcid_all" || mode === "full_names";
+        const showAffils = mode === "affiliations" || mode === "ror" || mode === "full_names";
+        return (
+          <li key={i} className="author-row">
+            <div className="author-main">
+              <span className="author-name">
+                {a.full_name || `${a.given_name || ""} ${a.surname || ""}`.trim() || "(unnamed)"}
+              </span>
+              {a.is_corresponding && <span className="chip chip-warn">corresponding</span>}
+              {showOrcid && (a.orcid ? (
+                <a className="chip chip-orcid" href={`https://orcid.org/${a.orcid}`} target="_blank" rel="noreferrer">
+                  ORCID {a.orcid}
+                </a>
+              ) : (
+                <span className="chip chip-missing">no ORCID</span>
+              ))}
+              {a.email && <span className="muted small mono">{a.email}</span>}
+            </div>
+            {showAffils && ((a.affiliations && a.affiliations.length > 0) ? (
+              <ul className="aff-rows">
+                {a.affiliations.map((aff: string, j: number) => {
+                  const ror = (a.ror_ids || [])[j];
+                  return (
+                    <li key={j} className="aff-row">
+                      <span className="aff-text">{aff}</span>
+                      {mode === "ror" && (ror ? (
+                        <a className="chip chip-ror" href={ror} target="_blank" rel="noreferrer">
+                          {ror.replace("https://ror.org/", "ROR ")}
+                        </a>
+                      ) : (
+                        <span className="chip chip-missing">no ROR</span>
+                      ))}
+                      {mode === "affiliations" && ror && (
+                        <a className="chip chip-ror" href={ror} target="_blank" rel="noreferrer">
+                          {ror.replace("https://ror.org/", "ROR ")}
+                        </a>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="muted small" style={{ marginLeft: 16 }}>no affiliations attached</p>
+            ))}
+            {evidence.length > 0 && (
+              <details className="author-evidence">
+                <summary className="muted small">why this match? · confidence {Math.round((prov.confidence ?? 0) * 100)}%</summary>
+                <ul>{evidence.map((e, k) => <li key={k} className="small">{e}</li>)}</ul>
+              </details>
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+const AUTHOR_VIEW_FIELDS: Record<string, AuthorsListMode> = {
+  authors_any:              "full_names",
+  full_author_names:        "full_names",
+  orcid_for_corresponding:  "orcid_corresponding",
+  orcid_for_all_authors:    "orcid_all",
+  affiliations_listed:      "affiliations",
+  ror_for_all_affiliations: "ror",
+};
+
 function FieldCard({
-  subId, field, expanded, onToggleExpand, onConfirm, onReject, onAutofix, onLocate, busy,
+  subId, field, expanded, onToggleExpand, onConfirm, onReject, onAutofix, onRunStructurer, onLocate, busy,
 }: {
   subId: number;
   field: FieldScore;
@@ -395,7 +712,8 @@ function FieldCard({
   onConfirm: () => void;
   onReject: () => void;
   onAutofix?: () => void;
-  onLocate: (page: number, boxIds: number[]) => Promise<void>;
+  onRunStructurer?: () => void;
+  onLocate: (page: number, boxIds: number[], joinedText: string) => Promise<void>;
   busy: boolean;
 }) {
   const state = deriveState(field);
@@ -438,14 +756,20 @@ function FieldCard({
         <div className="field-detail">
           <p className="muted small">{field.why}</p>
 
+          {field.key === "credit_roles" && (state === "confirmed" || state === "pending") && (
+            <CreditContributionsView subId={subId} />
+          )}
+
+          {AUTHOR_VIEW_FIELDS[field.key] && (state === "confirmed" || state === "pending" || state === "missing") && (
+            <AuthorsListView subId={subId} mode={AUTHOR_VIEW_FIELDS[field.key]} />
+          )}
+
           {state === "confirmed" && (
             <div className="actions">
-              <button className="ghost" onClick={onReject} disabled={busy}>Reject and re-identify</button>
-              {canLocate && (
-                <button className="ghost" onClick={() => setLocateOpen((v) => !v)} disabled={busy}>
-                  {locateOpen ? "Close" : "Identify on document"}
-                </button>
-              )}
+              <button className="ghost" onClick={onReject} disabled={busy}
+                      title="Mark this field as wrong and re-identify on the document.">
+                Reject and re-identify
+              </button>
             </div>
           )}
 
@@ -455,24 +779,33 @@ function FieldCard({
               <div className="actions">
                 <button className="primary" onClick={onConfirm} disabled={busy}>Confirm</button>
                 <button className="ghost" onClick={onReject} disabled={busy}>Reject and re-identify</button>
-                <button className="ghost" onClick={() => setLocateOpen((v) => !v)} disabled={busy}>
-                  {locateOpen ? "Close" : "Identify on document"}
-                </button>
               </div>
             </>
           )}
 
           {state === "missing" && (
             <div className="actions">
-              {onAutofix && <button className="primary" onClick={onAutofix} disabled={busy}>Run extraction</button>}
-              <button className={onAutofix ? "ghost" : "primary"} onClick={() => setLocateOpen((v) => !v)} disabled={busy}>
+              <button className="primary" onClick={() => setLocateOpen((v) => !v)} disabled={busy}
+                      title={
+                        field.llm_leverage === "ai" && field.structurer_task
+                          ? `Pick the section on the page; we'll send the selected text to ${field.structurer_task} (~$${(field.ai_cost_estimate ?? 0).toFixed(4)}).`
+                          : "Pick the box(es) on the page that contain this field's value."
+                      }>
                 Identify on document
+                {field.llm_leverage === "ai" && field.structurer_task && (
+                  <span className="btn-meta">AI · ~${(field.ai_cost_estimate ?? 0).toFixed(4)}</span>
+                )}
               </button>
             </div>
           )}
 
           {state === "needs_locate" && (
-            <p className="muted small">Pick the box(es) on the page that contain this field's value.</p>
+            <p className="muted small">
+              Pick the box(es) on the page that contain this field's value.
+              {field.llm_leverage === "ai" && field.structurer_task && (
+                <> The selection will be sent to the AI structurer (~${(field.ai_cost_estimate ?? 0).toFixed(4)}).</>
+              )}
+            </p>
           )}
 
           {state === "needs_pick" && (
@@ -494,8 +827,8 @@ function FieldCard({
               subId={subId}
               field={field}
               defaultPage={expectedPageFor(field.key)}
-              onSubmit={async (page, boxIds) => {
-                await onLocate(page, boxIds);
+              onSubmit={async (page, boxIds, joinedText) => {
+                await onLocate(page, boxIds, joinedText);
                 setLocateOpen(false);
               }}
             />
@@ -516,7 +849,7 @@ function LocatePanel({
   subId: number;
   field: FieldScore;
   defaultPage: number;
-  onSubmit: (page: number, boxIds: number[]) => Promise<void>;
+  onSubmit: (page: number, boxIds: number[], joinedText: string) => Promise<void>;
 }) {
   const [pages, setPages] = useState<PageInfo[]>([]);
   const [pageNo, setPageNo] = useState(defaultPage);
@@ -572,7 +905,7 @@ function LocatePanel({
     setErr(null);
     setSubmitting(true);
     try {
-      await onSubmit(pageNo, [...selected]);
+      await onSubmit(pageNo, [...selected], previewText);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -666,469 +999,6 @@ const STATE_INFO: Record<CardState, { Icon: IconType; color: string; label: stri
   missing:      { Icon: CircleIcon,     color: "var(--fg-tertiary)",   label: "Missing" },
   manual:       { Icon: PencilIcon,     color: "var(--info)",          label: "Needs you" },
 };
-
-// ============================================================================
-// Authors + Affiliations supercard — single combined interaction
-// ============================================================================
-
-type SupercardStage = "locate" | "enrich" | "verify" | "done";
-
-function AuthorsAffiliationsSuperCard({
-  subId, card, busy, onUpdate, showToast, setBusy, setErr,
-}: {
-  subId: number;
-  card: Scorecard;
-  busy: boolean;
-  onUpdate: () => Promise<void>;
-  showToast: (msg: string) => void;
-  setBusy: (s: string | null) => void;
-  setErr: (s: string | null) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [listOpen, setListOpen] = useState(true);
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    return localStorage.getItem(`supercard.aa.collapsed.${subId}`) === "1";
-  });
-  const [authors, setAuthors] = useState<any[]>([]);
-  const [provenance, setProvenance] = useState<Record<string, any>>({});
-
-  function toggleCollapsed() {
-    setCollapsed((v) => {
-      const n = !v;
-      localStorage.setItem(`supercard.aa.collapsed.${subId}`, n ? "1" : "0");
-      return n;
-    });
-  }
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const m = await getMetadata(subId);
-        setAuthors(m.authors || []);
-        setProvenance(m.provenance || {});
-      } catch (e) {
-        setAuthors([]);
-      }
-    })();
-  }, [subId, card]);
-
-  // Read current state for every rubric field this supercard owns
-  const ownedFields: { key: string; tier: string; label: string; field: FieldScore | undefined; state: CardState }[] = [
-    "authors_any", "full_author_names", "affiliations_listed",
-    "orcid_for_corresponding", "orcid_for_all_authors", "ror_for_all_affiliations",
-  ].map((k) => {
-    const f = card.fields.find((x) => x.key === k);
-    return { key: k, tier: f?.tier ?? "", label: f?.label ?? k, field: f, state: f ? deriveState(f) : "missing" };
-  });
-
-  if (!ownedFields[0].field) return null;
-
-  const stateIcon: Record<CardState, IconType> = {
-    confirmed: CheckIcon,
-    pending: HelpCircleIcon,
-    needs_pick: ScaleIcon,
-    needs_locate: XIcon,
-    missing: CircleIcon,
-    manual: PencilIcon,
-  };
-  const stateColor: Record<CardState, string> = {
-    confirmed: "var(--ok)", pending: "var(--warn)", needs_pick: "var(--info)",
-    needs_locate: "var(--error)", missing: "var(--fg-tertiary)", manual: "var(--info)",
-  };
-
-  const presentCount = ownedFields.filter((o) => o.field?.status === "present").length;
-
-  // Derive the current stage from the actual data — drives which CTA shows.
-  const haveAuthors = authors.length > 0;
-  const haveAnyOrcid = authors.some((a) => a.orcid);
-  const haveAnyROR = authors.some((a) => (a.ror_ids || []).some((r: any) => r));
-  const allHaveOrcid = haveAuthors && authors.every((a) => a.orcid);
-  const allAffsHaveROR = haveAuthors && authors.every((a) => {
-    const affs = a.affiliations || [];
-    if (affs.length === 0) return true;
-    const rors = a.ror_ids || [];
-    return affs.every((_: string, i: number) => rors[i]);
-  });
-
-  let stage: SupercardStage;
-  if (!haveAuthors) stage = "locate";
-  else if (!haveAnyOrcid && !haveAnyROR) stage = "enrich";
-  else if (!allHaveOrcid || !allAffsHaveROR) stage = "verify";
-  else stage = "done";
-
-  async function fetchOrcidsAndRors() {
-    setBusy("Fetching ORCIDs and RORs (free)…");
-    setErr(null);
-    try {
-      await autofix(subId, "resolve_orcids");
-      await autofix(subId, "resolve_rors");
-      await onUpdate();
-      showToast("ORCID + ROR sweeps complete (free)");
-    } catch (e) { setErr(String(e)); }
-    finally { setBusy(null); }
-  }
-
-  async function verifyWithAI() {
-    setBusy("Verifying authors with AI…");
-    setErr(null);
-    try {
-      const r = await fetch(`${(import.meta.env.VITE_API_BASE_URL as string) || "http://localhost:8000"}/submissions/${subId}/structure/verify_authors`, { method: "POST" });
-      if (!r.ok) throw new Error(`verify failed: ${r.status} ${await r.text()}`);
-      await onUpdate();
-      showToast("AI verification complete · check the evidence chains");
-    } catch (e) { setErr(String(e)); }
-    finally { setBusy(null); }
-  }
-
-  return (
-    <div className={`card supercard ${collapsed ? "supercard-collapsed" : ""}`}>
-      <div className="row supercard-header" onClick={toggleCollapsed} style={{ cursor: "pointer" }}>
-        <div className="cluster">
-          <span className="chev">
-            {collapsed ? <ChevronRightIcon size={16} /> : <ChevronDownIcon size={16} />}
-          </span>
-          <h2 className="card-title" style={{ margin: 0 }}>Authors and affiliations</h2>
-        </div>
-        <span className="mono small" style={{ color: presentCount === ownedFields.length ? "var(--ok)" : "var(--fg-tertiary)" }}>
-          {presentCount}/{ownedFields.length} fields · {stage}
-        </span>
-      </div>
-
-      {!collapsed && (
-        <>
-          <p className="muted small" style={{ margin: "6px 0 0" }}>
-            Linked via superscript markers — extracted, looked up, and verified together.
-            Covers {ownedFields.length} rubric fields across T0–T2.
-          </p>
-
-          <div className="supercard-checklist">
-            {ownedFields.map((o) => {
-              const StateGlyph = stateIcon[o.state];
-              return (
-                <div key={o.key} className="supercard-check-row" title={o.field?.why || ""}>
-                  <span className="check-glyph" style={{ color: stateColor[o.state] }}>
-                    <StateGlyph size={12} />
-                  </span>
-                  <span className="check-tier mono">{o.tier}</span>
-                  <span className="check-label">{o.label}</span>
-                  <span className="check-preview muted">{o.field?.value_preview ?? "—"}</span>
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="actions supercard-actions">
-            {stage === "locate" && (
-              <button className="primary" onClick={() => setOpen((v) => !v)} disabled={busy}>
-                {open ? "Close" : "Identify on document"}
-              </button>
-            )}
-
-            {stage === "enrich" && (
-              <>
-                <button className="primary" onClick={fetchOrcidsAndRors} disabled={busy}>
-                  Run lookups<span className="btn-meta">ORCID · ROR · free</span>
-                </button>
-                <button onClick={verifyWithAI} disabled={busy}>
-                  Cross-source verify<span className="btn-meta">AI · ~$0.011</span>
-                </button>
-                <button className="ghost" onClick={() => setOpen((v) => !v)} disabled={busy}>
-                  {open ? "Close" : "Re-identify"}
-                </button>
-              </>
-            )}
-
-            {stage === "verify" && (
-              <>
-                <button className="primary" onClick={verifyWithAI} disabled={busy}>
-                  Cross-source verify<span className="btn-meta">AI · ~$0.011</span>
-                </button>
-                <button onClick={fetchOrcidsAndRors} disabled={busy}>
-                  Re-run lookups
-                </button>
-                <button className="ghost" onClick={() => setOpen((v) => !v)} disabled={busy}>
-                  {open ? "Close" : "Re-identify"}
-                </button>
-              </>
-            )}
-
-            {stage === "done" && (
-              <>
-                <span className="status status-ready">complete</span>
-                <button className="ghost" onClick={verifyWithAI} disabled={busy}>
-                  Re-verify
-                </button>
-                <button className="ghost" onClick={() => setOpen((v) => !v)} disabled={busy}>
-                  {open ? "Close" : "Re-identify"}
-                </button>
-              </>
-            )}
-          </div>
-
-      {open && (
-        <AuthorsAffiliationsLocate
-          subId={subId}
-          onCancel={() => setOpen(false)}
-          onSubmit={async (page, authorIds, affilIds) => {
-            setBusy("Structuring authors & affiliations…");
-            setErr(null);
-            try {
-              const res = await locateAuthorsAffiliations(subId, page, authorIds, affilIds);
-              await onUpdate();
-              showToast(`Linked ${res.report?.authors_count ?? 0} authors with affiliations`);
-              setOpen(false);
-            } catch (e) {
-              setErr(String(e));
-            } finally {
-              setBusy(null);
-            }
-          }}
-        />
-      )}
-
-      {!collapsed && authors.length > 0 && (
-        <div className="authors-list">
-          <button
-            className="ghost authors-list-toggle"
-            onClick={() => setListOpen((v) => !v)}
-            aria-expanded={listOpen}
-          >
-            <span className="chev">{listOpen ? <ChevronDownIcon size={14} /> : <ChevronRightIcon size={14} />}</span>
-            <strong>{authors.length} extracted authors</strong>
-            <span className="muted small">
-              · {authors.filter((a) => a.orcid).length}/{authors.length} ORCID
-              · {authors.filter((a) => (a.ror_ids || []).some((r: any) => r)).length}/{authors.length} have ROR
-            </span>
-          </button>
-          {listOpen && (
-            <ol className="author-rows">
-              {authors.map((a: any, i: number) => {
-                const prov = provenance[`authors[${i}]`] || {};
-                const evidence: string[] = prov.evidence_chain || [];
-                return (
-                  <li key={i} className="author-row">
-                    <div className="author-main">
-                      <span className="author-name">
-                        {a.full_name || `${a.given_name || ""} ${a.surname || ""}`.trim() || "(unnamed)"}
-                      </span>
-                      {a.is_corresponding && <span className="chip chip-warn">corresponding</span>}
-                      {a.orcid ? (
-                        <a className="chip chip-orcid" href={`https://orcid.org/${a.orcid}`} target="_blank" rel="noreferrer">
-                          ORCID {a.orcid}
-                        </a>
-                      ) : (
-                        <span className="chip chip-missing">no ORCID</span>
-                      )}
-                      {a.email && <span className="muted small mono">{a.email}</span>}
-                    </div>
-                    {(a.affiliations && a.affiliations.length > 0) ? (
-                      <ul className="aff-rows">
-                        {a.affiliations.map((aff: string, j: number) => {
-                          const ror = (a.ror_ids || [])[j];
-                          return (
-                            <li key={j} className="aff-row">
-                              <span className="aff-text">{aff}</span>
-                              {ror ? (
-                                <a className="chip chip-ror" href={ror} target="_blank" rel="noreferrer">
-                                  {ror.replace("https://ror.org/", "ROR ")}
-                                </a>
-                              ) : (
-                                <span className="chip chip-missing">no ROR</span>
-                              )}
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    ) : (
-                      <p className="muted small" style={{ marginLeft: 26 }}>no affiliations attached</p>
-                    )}
-                    {evidence.length > 0 && (
-                      <details className="author-evidence">
-                        <summary className="muted small">why this match? · confidence {Math.round((prov.confidence ?? 0) * 100)}%</summary>
-                        <ul>{evidence.map((e, k) => <li key={k} className="small">{e}</li>)}</ul>
-                      </details>
-                    )}
-                  </li>
-                );
-              })}
-            </ol>
-          )}
-        </div>
-      )}
-        </>
-      )}
-    </div>
-  );
-}
-
-type LocateMode = "authors" | "affiliations";
-
-function AuthorsAffiliationsLocate({
-  subId, onCancel, onSubmit,
-}: {
-  subId: number;
-  onCancel: () => void;
-  onSubmit: (page: number, authorIds: number[], affilIds: number[]) => Promise<void>;
-}) {
-  const [pages, setPages] = useState<PageInfo[]>([]);
-  const [pageNo, setPageNo] = useState(1);
-  const [boxes, setBoxes] = useState<LayoutBox[]>([]);
-  const [mode, setMode] = useState<LocateMode>("authors");
-  const [authorIds, setAuthorIds] = useState<Set<number>>(new Set());
-  const [affilIds, setAffilIds] = useState<Set<number>>(new Set());
-  const [err, setErr] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const pp = await getPages(subId);
-        if (pp.page_count === 0) {
-          setErr("No layout — DOCX uploads can't use Locate.");
-        } else {
-          setPages(pp.pages);
-        }
-      } catch (e) { setErr(String(e)); }
-    })();
-  }, [subId]);
-
-  useEffect(() => {
-    if (pages.length === 0) return;
-    (async () => {
-      try {
-        const r = await getPageBoxes(subId, pageNo);
-        setBoxes(r.boxes);
-      } catch (e) { setErr(String(e)); }
-    })();
-  }, [subId, pageNo, pages.length]);
-
-  function toggleBox(id: number) {
-    // A box can be in either set, but not both. Clicking in author-mode
-    // adds to authors and removes from affiliations (and vice versa).
-    if (mode === "authors") {
-      setAffilIds((prev) => { const n = new Set(prev); n.delete(id); return n; });
-      setAuthorIds((prev) => {
-        const n = new Set(prev);
-        if (n.has(id)) n.delete(id); else n.add(id);
-        return n;
-      });
-    } else {
-      setAuthorIds((prev) => { const n = new Set(prev); n.delete(id); return n; });
-      setAffilIds((prev) => {
-        const n = new Set(prev);
-        if (n.has(id)) n.delete(id); else n.add(id);
-        return n;
-      });
-    }
-  }
-
-  async function save() {
-    if (authorIds.size === 0 && affilIds.size === 0) {
-      setErr("Tag at least one box.");
-      return;
-    }
-    setErr(null);
-    setSubmitting(true);
-    try {
-      await onSubmit(pageNo, [...authorIds], [...affilIds]);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  if (err && pages.length === 0) {
-    return <div className="locate-panel"><p className="error">{err}</p></div>;
-  }
-  if (pages.length === 0) {
-    return <div className="locate-panel"><p className="muted loading">Loading page</p></div>;
-  }
-
-  const currentPage = pages.find((p) => p.page === pageNo);
-
-  return (
-    <div className="locate-panel">
-      <div className="locate-controls">
-        <button className="ghost" onClick={() => setPageNo((p) => Math.max(1, p - 1))} disabled={pageNo <= 1}>
-          <ArrowLeftIcon size={13} /> Prev
-        </button>
-        <span className="muted small">
-          Page <input type="number" min={1} max={pages.length} value={pageNo}
-            onChange={(e) => setPageNo(Math.max(1, Math.min(pages.length, Number(e.target.value))))}
-            style={{ width: 50 }} /> of {pages.length}
-        </span>
-        <button className="ghost" onClick={() => setPageNo((p) => Math.min(pages.length, p + 1))} disabled={pageNo >= pages.length}>
-          Next <ArrowRightIcon size={13} />
-        </button>
-        <span className="spacer" />
-        <span className="muted small">{boxes.length} boxes · {authorIds.size} authors · {affilIds.size} affs</span>
-      </div>
-
-      <div className="mode-toggle">
-        <span className="muted small">Tag boxes as:</span>
-        <button
-          className={`mode-btn mode-authors ${mode === "authors" ? "active" : ""}`}
-          onClick={() => setMode("authors")}
-        >
-          <span className="mode-dot" /> Authors ({authorIds.size})
-        </button>
-        <button
-          className={`mode-btn mode-affils ${mode === "affiliations" ? "active" : ""}`}
-          onClick={() => setMode("affiliations")}
-        >
-          <span className="mode-dot" /> Affiliations ({affilIds.size})
-        </button>
-        <span className="spacer" />
-        <button className="ghost" onClick={() => { setAuthorIds(new Set()); setAffilIds(new Set()); }}>Clear all</button>
-        <button className="ghost" onClick={onCancel}>Cancel</button>
-        <button className="primary" onClick={save} disabled={submitting || (authorIds.size === 0 && affilIds.size === 0)}>
-          {submitting ? "Structuring…" : "Extract linked authors  (~$0.0006)"}
-        </button>
-      </div>
-
-      <div
-        className="page-canvas-wrap locate-canvas"
-        style={currentPage ? { aspectRatio: `${currentPage.w_px} / ${currentPage.h_px}` } : undefined}
-      >
-        {currentPage && (
-          <>
-            <img src={pageImageUrl(subId, pageNo)} draggable={false} />
-            <div className="overlay-layer">
-              {boxes.map((b) => {
-                const isAuthor = authorIds.has(b.id);
-                const isAffil = affilIds.has(b.id);
-                let color = "rgba(122, 121, 116, 0.35)";
-                let bg = "transparent";
-                let cls = "";
-                if (isAuthor) { color = "#f54e00"; bg = "rgba(245, 78, 0, 0.18)"; cls = "selected"; }
-                else if (isAffil) { color = "#34785c"; bg = "rgba(52, 120, 92, 0.18)"; cls = "selected"; }
-                return (
-                  <div
-                    key={b.id}
-                    className={`box ${cls}`}
-                    style={{
-                      left: `${(b.bbox.x / currentPage.w_px) * 100}%`,
-                      top: `${(b.bbox.y / currentPage.h_px) * 100}%`,
-                      width: `${(b.bbox.w / currentPage.w_px) * 100}%`,
-                      height: `${(b.bbox.h / currentPage.h_px) * 100}%`,
-                      borderColor: color,
-                      background: bg,
-                    }}
-                    title={b.text.slice(0, 120)}
-                    onClick={() => toggleBox(b.id)}
-                  />
-                );
-              })}
-            </div>
-          </>
-        )}
-      </div>
-
-      {err && <p className="error" style={{ marginTop: 8 }}>{err}</p>}
-    </div>
-  );
-}
 
 
 function LeverageBadge({ leverage }: { leverage: "deterministic" | "api" | "ai" }) {

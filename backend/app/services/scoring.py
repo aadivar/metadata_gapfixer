@@ -19,6 +19,11 @@ from .factsheet import Factsheet
 
 
 Tier = Literal["T0", "T1", "T2", "T3"]
+# The five Crossref Research Nexus dimensions (per nexus-score.vercel.app
+# and Crossref Participation Reports). `mandatory` is the sixth pseudo-
+# dimension — Crossref's deposit-minimum gate, which must be satisfied
+# before the weighted Research Nexus score even applies.
+Dimension = Literal["mandatory", "provenance", "people", "funding", "access", "organizations"]
 Bucket = Literal["high", "medium", "manual"]
 Status = Literal["present", "missing"]
 Leverage = Literal["deterministic", "api", "ai"]
@@ -28,7 +33,8 @@ class FieldDef(BaseModel):
     key: str
     label: str
     tier: Tier
-    weight: int          # 1..10 — higher = more important within tier
+    dimension: Dimension = "access"      # which Research Nexus dimension this field belongs to
+    weight: int          # 1..10 — higher = more important within dimension
     bucket: Bucket       # how to fix when missing
     autofix_action: str | None = None  # name of an /autofix endpoint, if any
     why: str             # one-line "what does this enable?" — shown as hover/help
@@ -41,6 +47,11 @@ class FieldDef(BaseModel):
     # Indicative cost (USD) per gap when llm_leverage="ai" — used by the
     # GUI to show "~$0.0NN to enrich all AI gaps in this tier" estimates.
     ai_cost_estimate: float = 0.0
+    # When llm_leverage="ai", which structurer task should the per-field
+    # "Run AI extraction" button hit? Maps to one of the names in
+    # `services.structurers.STRUCTURER_TASKS` and the
+    # POST /submissions/{id}/structure/{task} endpoint.
+    structurer_task: str | None = None
 
 
 # ============================================================================
@@ -48,42 +59,62 @@ class FieldDef(BaseModel):
 # ============================================================================
 
 RUBRIC: list[FieldDef] = [
-    # ─── T0 Depositable ─────────────────────────────────────────────────────
-    FieldDef(key="doi",            label="DOI",                tier="T0", weight=10, bucket="high",   autofix_action="from_factsheet",     llm_leverage="deterministic", why="Without a DOI you cannot deposit."),
-    FieldDef(key="title",          label="Article title",      tier="T0", weight=10, bucket="high",   autofix_action="from_docling_title", llm_leverage="deterministic", why="Mandatory in Crossref schema."),
-    FieldDef(key="journal_title",  label="Journal title",      tier="T0", weight=8,  bucket="manual",                                       llm_leverage="api",           why="From publisher profile or Crossref-by-ISSN lookup."),
-    FieldDef(key="issn",           label="ISSN",               tier="T0", weight=8,  bucket="high",   autofix_action="from_factsheet",     llm_leverage="deterministic", why="Identifies the journal."),
-    FieldDef(key="publication_year", label="Publication year", tier="T0", weight=7,  bucket="high",   autofix_action="from_factsheet",     llm_leverage="api",           why="Required for citation."),
-    FieldDef(key="authors_any",    label="At least one author", tier="T0", weight=7, bucket="high",   autofix_action="from_factsheet",     llm_leverage="ai", ai_cost_estimate=0.0006, why="Required. AI cleans up superscript-marker linking when deterministic fails."),
+    # ─── Mandatory (Crossref deposit minimum) ───────────────────────────────
+    # These are gating: a record can't even be deposited until they're present.
+    FieldDef(key="doi",                   label="DOI",                                 tier="T0", dimension="mandatory", weight=10, bucket="high",   autofix_action="from_factsheet",     llm_leverage="deterministic", why="Without a DOI you cannot deposit."),
+    FieldDef(key="title",                 label="Article title",                       tier="T0", dimension="mandatory", weight=10, bucket="high",   autofix_action="from_docling_title", llm_leverage="deterministic", why="Mandatory in Crossref schema."),
+    FieldDef(key="journal_title",         label="Journal title",                       tier="T0", dimension="mandatory", weight=8,  bucket="manual",                                       llm_leverage="api",           why="From publisher profile or Crossref-by-ISSN lookup."),
+    FieldDef(key="issn",                  label="ISSN",                                tier="T0", dimension="mandatory", weight=8,  bucket="high",   autofix_action="from_factsheet",     llm_leverage="deterministic", why="Identifies the journal."),
+    FieldDef(key="publication_year",      label="Publication year",                    tier="T0", dimension="mandatory", weight=7,  bucket="high",   autofix_action="from_factsheet",     llm_leverage="api",           why="Required for citation."),
+    FieldDef(key="authors_any",           label="At least one author",                 tier="T0", dimension="mandatory", weight=7,  bucket="high",   autofix_action="from_factsheet",     llm_leverage="ai", ai_cost_estimate=0.0006, structurer_task="structure_authors", why="Required. AI cleans up superscript-marker linking when deterministic fails."),
+    FieldDef(key="publication_date_full", label="Precise pub date (Y/M/D)",            tier="T1", dimension="mandatory", weight=5,  bucket="medium", autofix_action="crossref_by_doi",    llm_leverage="api",           why="Crossref-by-DOI lookup."),
+    FieldDef(key="volume_issue_pages",    label="Volume / issue / pages",              tier="T1", dimension="mandatory", weight=5,  bucket="medium", autofix_action="crossref_by_doi",    llm_leverage="api",           why="Crossref-by-DOI lookup."),
+    FieldDef(key="copyright_holder",      label="Copyright holder",                    tier="T3", dimension="mandatory", weight=3,  bucket="manual",                                      llm_leverage="deterministic", why="Publisher policy — your input."),
 
-    # ─── T1 Discoverable ────────────────────────────────────────────────────
-    FieldDef(key="abstract",       label="Abstract",           tier="T1", weight=8,  bucket="high",   autofix_action="from_docling_abstract", llm_leverage="deterministic", why="Indexers and discovery layers rely on it."),
-    FieldDef(key="full_author_names", label="Full author names (not initials)", tier="T1", weight=6, bucket="high", autofix_action="from_factsheet", llm_leverage="ai", ai_cost_estimate=0.0006, why="AI splits given/surname and resolves messy formatting."),
-    FieldDef(key="publication_date_full", label="Precise pub date (Y/M/D)", tier="T1", weight=5, bucket="medium", autofix_action="crossref_by_doi", llm_leverage="api", why="Crossref-by-DOI lookup."),
-    FieldDef(key="volume_issue_pages", label="Volume / issue / pages", tier="T1", weight=5, bucket="medium", autofix_action="crossref_by_doi", llm_leverage="api", why="Crossref-by-DOI lookup."),
-    FieldDef(key="license_url",    label="License URL",        tier="T1", weight=6,  bucket="high",   autofix_action="from_factsheet",       llm_leverage="deterministic", why="Defines reuse permissions."),
-    FieldDef(key="references_any", label="References (any form)", tier="T1", weight=6, bucket="high", autofix_action="from_docling_refs",    llm_leverage="deterministic", why="Discoverability and citation graph."),
-    FieldDef(key="affiliations_listed", label="Affiliations extracted",        tier="T1", weight=6, bucket="high", autofix_action="from_factsheet", llm_leverage="ai", ai_cost_estimate=0.0006, why="Per-author affiliation strings are required to attach ROR IDs and verify institutions."),
+    # ─── Provenance (25%) — citations, similarity, update policies ──────────
+    FieldDef(key="references_any",        label="References (any form)",               tier="T1", dimension="provenance",  weight=6, bucket="high",   autofix_action="from_docling_refs",    llm_leverage="deterministic", why="Discoverability and citation graph."),
+    FieldDef(key="references_with_doi",   label="References with DOIs",                tier="T2", dimension="provenance",  weight=8, bucket="high",   autofix_action="resolve_references",   llm_leverage="ai", ai_cost_estimate=0.009, structurer_task="structure_references", why="Cited-by linking. LLM picks the right Crossref candidate per citation with match evidence."),
+    FieldDef(key="preprint_relation",     label="Preprint → version-of-record link",   tier="T3", dimension="provenance",  weight=8, bucket="medium", autofix_action="detect_preprint",      llm_leverage="deterministic", why="bioRxiv / medRxiv DOI pattern detection."),
+    FieldDef(key="crossmark_policy",      label="Crossmark policy URL",                tier="T3", dimension="provenance",  weight=4, bucket="manual",                                       llm_leverage="deterministic", why="Update / correction / retraction policy."),
+    FieldDef(key="conflict_of_interest",  label="Conflict-of-interest statement",      tier="T3", dimension="provenance",  weight=5, bucket="high",   autofix_action="from_factsheet",       llm_leverage="deterministic", why="Boilerplate-anchor extraction."),
+    FieldDef(key="data_availability",     label="Data / code availability statement",  tier="T3", dimension="provenance",  weight=5, bucket="high",   autofix_action="from_factsheet",       llm_leverage="deterministic", why="Linkage from the article to its underlying data."),
 
-    # ─── T2 Linkable ────────────────────────────────────────────────────────
-    FieldDef(key="orcid_for_corresponding", label="ORCID for corresponding author", tier="T2", weight=8, bucket="high", autofix_action="resolve_orcids", llm_leverage="ai", ai_cost_estimate=0.001, why="Verified by AI across ORCID + OpenAlex + ROR."),
-    FieldDef(key="orcid_for_all_authors", label="ORCID for every author", tier="T2", weight=7, bucket="high", autofix_action="resolve_orcids", llm_leverage="ai", ai_cost_estimate=0.011, why="Full author disambiguation across ORCID + OpenAlex + ROR with cited evidence."),
-    FieldDef(key="ror_for_all_affiliations", label="ROR for every affiliation", tier="T2", weight=7, bucket="high", autofix_action="resolve_rors", llm_leverage="ai", ai_cost_estimate=0.0, why="Resolved as part of the per-author verification (no extra cost)."),
-    FieldDef(key="references_with_doi", label="References with DOIs", tier="T2", weight=8, bucket="high", autofix_action="resolve_references", llm_leverage="ai", ai_cost_estimate=0.009, why="LLM picks the right Crossref candidate per citation with match evidence."),
-    FieldDef(key="funder_doi",     label="Funder Registry DOI",  tier="T2", weight=6, bucket="high", autofix_action="resolve_funders", llm_leverage="api", why="OpenAlex funder lookup; AI only when 2+ candidates match."),
-    FieldDef(key="award_numbers",  label="Award / grant numbers", tier="T2", weight=5, bucket="high", autofix_action="from_factsheet", llm_leverage="ai", ai_cost_estimate=0.0003, why="AI links grant numbers to specific funders + authors."),
-    FieldDef(key="abstract_jats",  label="JATS-formatted abstract", tier="T2", weight=4, bucket="medium", llm_leverage="ai", ai_cost_estimate=0.0005, why="Structured JATS markup needs the LLM."),
-    FieldDef(key="oa_indicator",   label="Open-access indicator", tier="T2", weight=5, bucket="high", autofix_action="from_license", llm_leverage="deterministic", why="Derived from license URL."),
+    # ─── People (20%) — author identity + contributor roles ─────────────────
+    FieldDef(key="full_author_names",     label="Full author names (not initials)",    tier="T1", dimension="people",      weight=6, bucket="high",   autofix_action="from_factsheet",       llm_leverage="ai", ai_cost_estimate=0.0006, structurer_task="structure_authors", why="AI splits given/surname and resolves messy formatting."),
+    FieldDef(key="orcid_for_corresponding", label="ORCID for corresponding author",    tier="T2", dimension="people",      weight=8, bucket="high",   autofix_action="resolve_orcids",       llm_leverage="ai", ai_cost_estimate=0.001,  structurer_task="verify_authors",   why="Verified by AI across ORCID + OpenAlex + ROR."),
+    FieldDef(key="orcid_for_all_authors", label="ORCID for every author",              tier="T2", dimension="people",      weight=7, bucket="high",   autofix_action="resolve_orcids",       llm_leverage="ai", ai_cost_estimate=0.011,  structurer_task="verify_authors",   why="Full author disambiguation across ORCID + OpenAlex + ROR with cited evidence."),
+    FieldDef(key="credit_roles",          label="CRediT contributor roles",            tier="T3", dimension="people",      weight=6, bucket="high",                                          llm_leverage="ai", ai_cost_estimate=0.0005, structurer_task="structure_credit", why="LLM maps free-text contributions onto the 14-role CRediT taxonomy."),
 
-    # ─── T3 Integrity-grade ─────────────────────────────────────────────────
-    FieldDef(key="preprint_relation", label="Preprint → version-of-record link", tier="T3", weight=8, bucket="medium", autofix_action="detect_preprint", llm_leverage="deterministic", why="bioRxiv / medRxiv DOI pattern detection."),
-    FieldDef(key="crossmark_policy", label="Crossmark policy URL", tier="T3", weight=4, bucket="manual", llm_leverage="deterministic", why="Pure publisher policy — your input."),
-    FieldDef(key="plain_language_summary", label="Plain-language summary", tier="T3", weight=4, bucket="medium", llm_leverage="ai", ai_cost_estimate=0.0005, why="Locating + extracting from prose if not labeled."),
-    FieldDef(key="conflict_of_interest", label="Conflict-of-interest statement", tier="T3", weight=5, bucket="high", autofix_action="from_factsheet", llm_leverage="deterministic", why="Boilerplate-anchor extraction."),
-    FieldDef(key="data_availability", label="Data availability statement", tier="T3", weight=5, bucket="high", autofix_action="from_factsheet", llm_leverage="deterministic", why="Boilerplate-anchor extraction."),
-    FieldDef(key="copyright_holder", label="Copyright holder", tier="T3", weight=3, bucket="manual", llm_leverage="deterministic", why="Publisher policy — your input."),
-    FieldDef(key="credit_roles", label="CRediT contributor roles", tier="T3", weight=6, bucket="high", llm_leverage="ai", ai_cost_estimate=0.0005, why="LLM maps free-text contributions onto the 14-role CRediT taxonomy."),
+    # ─── Funding (20%) — funder + award ─────────────────────────────────────
+    FieldDef(key="funder_doi",            label="Funder Registry DOI",                 tier="T2", dimension="funding",     weight=6, bucket="high",   autofix_action="resolve_funders",      llm_leverage="api",          why="OpenAlex funder lookup; AI only when 2+ candidates match."),
+    FieldDef(key="award_numbers",         label="Award / grant numbers",               tier="T2", dimension="funding",     weight=5, bucket="high",   autofix_action="from_factsheet",       llm_leverage="ai", ai_cost_estimate=0.0003, structurer_task="structure_funding", why="AI links grant numbers to specific funders + authors."),
+
+    # ─── Access (20%) — discoverability + reuse rights ──────────────────────
+    FieldDef(key="abstract",              label="Abstract",                            tier="T1", dimension="access",      weight=8, bucket="high",   autofix_action="from_docling_abstract", llm_leverage="deterministic", why="Indexers and discovery layers rely on it."),
+    FieldDef(key="abstract_jats",         label="JATS-formatted abstract",             tier="T2", dimension="access",      weight=4, bucket="medium",                                        llm_leverage="ai", ai_cost_estimate=0.0005, why="Structured JATS markup needs the LLM."),
+    FieldDef(key="license_url",           label="License URL",                         tier="T1", dimension="access",      weight=6, bucket="high",   autofix_action="from_factsheet",       llm_leverage="deterministic", why="Defines reuse permissions."),
+    FieldDef(key="oa_indicator",          label="Open-access indicator",               tier="T2", dimension="access",      weight=5, bucket="high",   autofix_action="from_license",         llm_leverage="deterministic", why="Derived from license URL."),
+    FieldDef(key="plain_language_summary", label="Plain-language summary",             tier="T3", dimension="access",      weight=4, bucket="medium",                                        llm_leverage="ai", ai_cost_estimate=0.0005, why="Locating + extracting from prose if not labeled."),
+
+    # ─── Organizations (15%) — affiliations + RORs ──────────────────────────
+    FieldDef(key="affiliations_listed",   label="Affiliations extracted",              tier="T1", dimension="organizations", weight=6, bucket="high", autofix_action="from_factsheet",       llm_leverage="ai", ai_cost_estimate=0.0006, structurer_task="structure_authors", why="Per-author affiliation strings are required to attach ROR IDs."),
+    FieldDef(key="ror_for_all_affiliations", label="ROR for every affiliation",        tier="T2", dimension="organizations", weight=7, bucket="high", autofix_action="resolve_rors",         llm_leverage="ai", ai_cost_estimate=0.0,    structurer_task="verify_authors",   why="Resolved as part of the per-author verification (no extra cost)."),
 ]
+
+
+# ============================================================================
+# Research Nexus dimensions — weights and labels (per nexus-score.vercel.app)
+# ============================================================================
+
+DIMENSION_DEFS: list[dict] = [
+    {"key": "mandatory",     "label": "Mandatory",     "weight": 0,  "description": "Crossref minimum to register a DOI — DOI, title, author, date, target URL."},
+    {"key": "provenance",    "label": "Provenance",    "weight": 25, "description": "Establishes trust through citation links, content verification, and update policies."},
+    {"key": "people",        "label": "People",        "weight": 20, "description": "Connects researchers to their work through persistent identifiers and contributor roles."},
+    {"key": "funding",       "label": "Funding",       "weight": 20, "description": "Tracks research funding sources and enables compliance reporting."},
+    {"key": "access",        "label": "Access",        "weight": 20, "description": "Improves discoverability and clarifies usage rights."},
+    {"key": "organizations", "label": "Organizations", "weight": 15, "description": "Links research outputs to institutions and organizations."},
+]
+DIMENSION_WEIGHT: dict[str, int] = {d["key"]: d["weight"] for d in DIMENSION_DEFS}
 
 
 # Tier weights for the composite score
@@ -98,6 +129,7 @@ class FieldScore(BaseModel):
     key: str
     label: str
     tier: Tier
+    dimension: Dimension = "access"
     weight: int
     bucket: Bucket
     status: Status
@@ -106,6 +138,7 @@ class FieldScore(BaseModel):
     why: str
     llm_leverage: Leverage = "deterministic"
     ai_cost_estimate: float = 0.0
+    structurer_task: str | None = None
     # Provenance for present fields (so the GUI can render confirmed vs pending state)
     provenance_source: str | None = None
     provenance_confidence: float | None = None
@@ -132,8 +165,43 @@ class TierScore(BaseModel):
     breakdown: TierBreakdown = TierBreakdown()
 
 
+class DimensionScore(BaseModel):
+    """One of the six dimensions (`mandatory` + the five Research Nexus
+    dimensions). `score` is the percentage of weighted points present
+    within this dimension. `weight` is the dimension's contribution to the
+    overall Research Nexus score (0 for `mandatory`, since that's a gate)."""
+    key: Dimension
+    label: str
+    weight: int
+    score: int                # 0..100
+    fields_present: int
+    fields_total: int
+    description: str
+
+
+class NexusPillar(BaseModel):
+    """One of the four Crossref Research Nexus pillars (Participation Reports
+    framing). The numerator/denominator are *underlying entity counts*, not
+    rubric-field counts — so the pillar tracks progress smoothly (e.g. 7/9
+    ORCIDs) rather than flipping only at 100%.
+    """
+    key: str                  # researchers | funders | organizations | outputs
+    label: str
+    numerator: int
+    denominator: int
+    caption: str              # e.g. "7/9 authors with ORCID"
+    status: str               # complete | partial | empty | not_applicable
+
+
+class ResearchNexus(BaseModel):
+    pillars: list[NexusPillar]
+    pillars_complete: int     # number of pillars at 100%
+    pillars_started: int      # number of pillars with any progress > 0
+    overall_pct: int          # weighted across pillars (avg of per-pillar %)
+
+
 class Scorecard(BaseModel):
-    composite: int            # 0..100
+    composite: int            # 0..100  — legacy tier-weighted composite (kept)
     interpretation: str
     tiers: list[TierScore]
     fields: list[FieldScore]
@@ -142,12 +210,21 @@ class Scorecard(BaseModel):
     manual: list[FieldScore]
     facts_summary: dict[str, Any]
     estimated_full_enrichment_usd: float = 0.0   # cost to resolve every remaining AI gap
+    research_nexus: ResearchNexus | None = None
+    # Per-dimension scores (mandatory + five Research Nexus dimensions)
+    dimensions: list[DimensionScore] = []
+    # Crossref's deposit-readiness gate
+    mandatory_ready: bool = False
+    mandatory_present: int = 0
+    mandatory_total: int = 0
+    # Weighted Research Nexus score across the five non-mandatory dimensions
+    research_nexus_score: int = 0
 
 
 TIER_LABELS = {
     "T0": "Depositable",
     "T1": "Discoverable",
-    "T2": "Linkable",
+    "T2": "Research Nexus",
     "T3": "Integrity-grade",
 }
 
@@ -186,7 +263,13 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
         authors = _v("authors") or [a.model_dump() for a in fs.authors]
         if not authors:
             return (False, None)
-        complete = sum(1 for a in authors if a.get("given") and a.get("surname"))
+        # Saved metadata uses `given_name`; factsheet's Author model uses `given`.
+        # Accept either, plus `full_name` as a final fallback.
+        complete = sum(
+            1 for a in authors
+            if (a.get("given_name") or a.get("given") or a.get("full_name"))
+            and a.get("surname")
+        )
         return (complete == len(authors), f"{complete}/{len(authors)} have given+surname")
     if field == "publication_date_full":
         v = _v("publication_date") or ""
@@ -296,6 +379,14 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
     if field == "copyright_holder":
         v = _v("copyright_holder")
         return (bool(v), v)
+    if field == "credit_roles":
+        contribs = _v("credit_contributions") or []
+        if not contribs:
+            return (False, None)
+        n_with_roles = sum(1 for c in contribs if (c.get("roles") or []))
+        ok = n_with_roles > 0
+        total_roles = sum(len(c.get("roles") or []) for c in contribs)
+        return (ok, f"{n_with_roles}/{len(contribs)} authors · {total_roles} roles")
 
     return (False, None)
 
@@ -318,6 +409,7 @@ _FIELD_KEY_TO_PATHS: dict[str, list[str]] = {
     "crossmark_policy": ["crossmark_policy_url"],
     "plain_language_summary": ["plain_language_summary"],
     "copyright_holder": ["copyright_holder"],
+    "credit_roles": ["credit_contributions"],
 }
 
 
@@ -340,10 +432,11 @@ def score(factsheet: Factsheet, metadata: dict | None = None) -> Scorecard:
                 prov_entry = prov[p]
                 break
         fs_field = FieldScore(
-            key=fd.key, label=fd.label, tier=fd.tier, weight=fd.weight,
+            key=fd.key, label=fd.label, tier=fd.tier, dimension=fd.dimension, weight=fd.weight,
             bucket=fd.bucket, status="present" if present else "missing",
             value_preview=preview, autofix_action=fd.autofix_action, why=fd.why,
             llm_leverage=fd.llm_leverage, ai_cost_estimate=fd.ai_cost_estimate,
+            structurer_task=fd.structurer_task,
             provenance_source=prov_entry.get("source"),
             provenance_confidence=prov_entry.get("confidence"),
             provenance_confirmed=bool(prov_entry.get("confirmed")),
@@ -403,6 +496,18 @@ def score(factsheet: Factsheet, metadata: dict | None = None) -> Scorecard:
         "boilerplate_data": bool(factsheet.boilerplate.data_availability),
     }
 
+    research_nexus = _compute_research_nexus(factsheet, metadata or {})
+    dimensions = _compute_dimension_scores(fields_out)
+    by_dim = {d.key: d for d in dimensions}
+    mandatory = by_dim.get("mandatory")
+    mandatory_ready = bool(mandatory) and mandatory.score >= 100
+    mandatory_present = mandatory.fields_present if mandatory else 0
+    mandatory_total = mandatory.fields_total if mandatory else 0
+    # Weighted Research Nexus score = sum(dim.weight * dim.score) / sum(dim.weight)
+    rn_dims = [d for d in dimensions if d.weight > 0]
+    rn_total_weight = sum(d.weight for d in rn_dims) or 1
+    rn_score = round(sum(d.weight * d.score for d in rn_dims) / rn_total_weight)
+
     return Scorecard(
         composite=composite,
         interpretation=interpretation,
@@ -410,6 +515,153 @@ def score(factsheet: Factsheet, metadata: dict | None = None) -> Scorecard:
         high_impact=high_impact, medium=medium, manual=manual,
         facts_summary=facts_summary,
         estimated_full_enrichment_usd=round(total_ai_cost, 6),
+        research_nexus=research_nexus,
+        dimensions=dimensions,
+        mandatory_ready=mandatory_ready,
+        mandatory_present=mandatory_present,
+        mandatory_total=mandatory_total,
+        research_nexus_score=rn_score,
+    )
+
+
+def _compute_dimension_scores(fields: list[FieldScore]) -> list[DimensionScore]:
+    """Roll up the rubric into one score per dimension. Score = weighted
+    points present / weighted points possible, expressed as 0..100."""
+    out: list[DimensionScore] = []
+    for d in DIMENSION_DEFS:
+        dim_fields = [f for f in fields if f.dimension == d["key"]]
+        present_w = sum(f.weight for f in dim_fields if f.status == "present")
+        total_w = sum(f.weight for f in dim_fields) or 1
+        score_pct = round(100 * present_w / total_w)
+        out.append(DimensionScore(
+            key=d["key"], label=d["label"], weight=d["weight"],
+            score=score_pct,
+            fields_present=sum(1 for f in dim_fields if f.status == "present"),
+            fields_total=len(dim_fields),
+            description=d["description"],
+        ))
+    return out
+
+
+def _compute_research_nexus(fs: Factsheet, meta: dict) -> ResearchNexus:
+    """Build the four Crossref Research Nexus pillar stats from the actual
+    underlying entity counts (not rubric all-or-nothing). This is what
+    Participation Reports surface in their member dashboards."""
+    authors = meta.get("authors") or [a.model_dump() for a in fs.authors]
+
+    # Researchers — fraction of authors with a verified ORCID
+    n_authors = len(authors)
+    n_with_orcid = sum(1 for a in authors if a.get("orcid"))
+    if n_authors == 0:
+        researchers = NexusPillar(
+            key="researchers", label="Researchers (ORCID)",
+            numerator=0, denominator=0,
+            caption="No authors extracted yet.",
+            status="not_applicable",
+        )
+    else:
+        researchers = NexusPillar(
+            key="researchers", label="Researchers (ORCID)",
+            numerator=n_with_orcid, denominator=n_authors,
+            caption=f"{n_with_orcid}/{n_authors} authors with ORCID",
+            status="complete" if n_with_orcid == n_authors else
+                   "partial" if n_with_orcid > 0 else "empty",
+        )
+
+    # Funders — fraction of funders with a Funder Registry DOI
+    funders = meta.get("funders") or []
+    n_funders = len(funders)
+    n_funders_doi = sum(1 for fu in funders if fu.get("doi"))
+    grant_ids_count = len(fs.facts.grant_ids or [])
+    if n_funders == 0 and grant_ids_count == 0:
+        funders_pillar = NexusPillar(
+            key="funders", label="Funders (Funder Registry + grants)",
+            numerator=0, denominator=0,
+            caption="No funders or grant IDs detected yet.",
+            status="empty",
+        )
+    elif n_funders == 0 and grant_ids_count > 0:
+        funders_pillar = NexusPillar(
+            key="funders", label="Funders (Funder Registry + grants)",
+            numerator=0, denominator=grant_ids_count,
+            caption=f"0/{grant_ids_count} grant IDs linked to a Funder Registry entry",
+            status="partial",   # we have grant IDs, just not yet linked
+        )
+    else:
+        funders_pillar = NexusPillar(
+            key="funders", label="Funders (Funder Registry + grants)",
+            numerator=n_funders_doi, denominator=n_funders,
+            caption=f"{n_funders_doi}/{n_funders} funders with Funder Registry DOI",
+            status="complete" if n_funders_doi == n_funders else
+                   "partial" if n_funders_doi > 0 else "empty",
+        )
+
+    # Organizations — fraction of unique affiliations resolved to a ROR
+    unique_affs: set[str] = set()
+    for a in authors:
+        for aff in (a.get("affiliations") or []):
+            if aff and aff.strip():
+                unique_affs.add(aff.strip())
+    unique_affs.update(s.strip() for s in fs.affiliations.values() if s and s.strip())
+    unique_rors: set[str] = set()
+    for a in authors:
+        for r in (a.get("ror_ids") or []):
+            if r:
+                unique_rors.add(r)
+    n_affs = len(unique_affs)
+    n_rors = len(unique_rors)
+    if n_affs == 0:
+        orgs_pillar = NexusPillar(
+            key="organizations", label="Organizations (ROR)",
+            numerator=0, denominator=0,
+            caption="No affiliations parsed yet.",
+            status="not_applicable",
+        )
+    else:
+        ror_progress = min(n_rors, n_affs)
+        orgs_pillar = NexusPillar(
+            key="organizations", label="Organizations (ROR)",
+            numerator=ror_progress, denominator=n_affs,
+            caption=f"{ror_progress}/{n_affs} unique affiliations linked to ROR",
+            status="complete" if ror_progress == n_affs else
+                   "partial" if ror_progress > 0 else "empty",
+        )
+
+    # Outputs — fraction of references that have a DOI (cited-by linking)
+    references = meta.get("references") or []
+    n_refs = len(references)
+    n_refs_doi = sum(1 for r in references if r.get("doi"))
+    if n_refs == 0:
+        outputs_pillar = NexusPillar(
+            key="outputs", label="Outputs (refs with DOI)",
+            numerator=0, denominator=0,
+            caption="No references extracted yet.",
+            status="empty",
+        )
+    else:
+        outputs_pillar = NexusPillar(
+            key="outputs", label="Outputs (refs with DOI)",
+            numerator=n_refs_doi, denominator=n_refs,
+            caption=f"{n_refs_doi}/{n_refs} references have a DOI",
+            status="complete" if n_refs_doi == n_refs else
+                   "partial" if n_refs_doi > 0 else "empty",
+        )
+
+    pillars = [researchers, funders_pillar, orgs_pillar, outputs_pillar]
+    pillars_complete = sum(1 for p in pillars if p.status == "complete")
+    pillars_started = sum(1 for p in pillars if p.status in ("complete", "partial"))
+    # Overall % = average of per-pillar pct (treating not_applicable as 0)
+    pcts = [
+        round(100 * p.numerator / p.denominator) if p.denominator > 0 else 0
+        for p in pillars
+    ]
+    overall = round(sum(pcts) / len(pcts)) if pcts else 0
+
+    return ResearchNexus(
+        pillars=pillars,
+        pillars_complete=pillars_complete,
+        pillars_started=pillars_started,
+        overall_pct=overall,
     )
 
 

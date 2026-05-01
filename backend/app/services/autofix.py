@@ -382,19 +382,35 @@ def _autofix_rors(meta: dict, fs: Factsheet) -> AutofixReport:
                 rors_for_author.append(rid)
                 resolved += 1
             else:
-                # needs_pick — attach candidates, no LLM call
-                meta.setdefault("provenance", {})[path] = {
-                    "source": "needs_pick", "confidence": 0.0,
-                    "reasoning": f"{len(cands)} candidates returned by ROR; pick one or use AI to adjudicate.",
-                    "candidates": _candidates_to_provenance(cands, ["ror_id"]),
-                    "query": {"affiliation_string": affil},
-                    "task": "ror_pick", "source_api": "ROR",
-                }
-                aff_cache[affil] = {"ror_id": None, "source": "needs_pick",
-                                    "reasoning": "Multiple candidates — see provenance.",
-                                    "confidence": 0.0}
-                rors_for_author.append(None)
-                needs_pick += 1
+                # ROR returns a ranked list with a `score` per hit. If the
+                # top candidate is a clear winner (score ≥ 0.95 AND a margin
+                # of ≥ 0.10 over the runner-up) we accept it deterministically.
+                top = cands[0]
+                top_score = float(top.get("score") or 0)
+                next_score = float((cands[1].get("score") if len(cands) > 1 else 0) or 0)
+                if top_score >= 0.95 and (top_score - next_score) >= 0.10:
+                    rid = top["ror_id"]
+                    reasoning = f"Top ROR candidate score={top_score:.2f}, next={next_score:.2f}; clear winner."
+                    aff_cache[affil] = {"ror_id": rid, "source": "ror_api",
+                                        "reasoning": reasoning, "confidence": 0.95}
+                    _set_prov(meta, path, source="ror_api", confidence=0.95,
+                              reasoning=reasoning)
+                    rors_for_author.append(rid)
+                    resolved += 1
+                else:
+                    # needs_pick — attach candidates, no LLM call
+                    meta.setdefault("provenance", {})[path] = {
+                        "source": "needs_pick", "confidence": 0.0,
+                        "reasoning": f"{len(cands)} candidates returned by ROR (top score={top_score:.2f}); pick one or use AI to adjudicate.",
+                        "candidates": _candidates_to_provenance(cands, ["ror_id"]),
+                        "query": {"affiliation_string": affil},
+                        "task": "ror_pick", "source_api": "ROR",
+                    }
+                    aff_cache[affil] = {"ror_id": None, "source": "needs_pick",
+                                        "reasoning": "Multiple candidates — see provenance.",
+                                        "confidence": 0.0}
+                    rors_for_author.append(None)
+                    needs_pick += 1
         a["ror_ids"] = rors_for_author
 
     return AutofixReport({"action": "resolve_rors", "ok": True,

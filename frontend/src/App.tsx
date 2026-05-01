@@ -36,7 +36,7 @@ export default function App() {
         <Link to="/" className="brand" style={{ textDecoration: "none", color: "inherit" }}>
           <div className="brand-mark">M</div>
           <div className="brand-text">
-            Metadata Gap Fixer
+            Metadata Generator
             <small>scholarly · Crossref</small>
           </div>
         </Link>
@@ -51,10 +51,23 @@ export default function App() {
 
         <div className="sidebar-footer">
           <ThemeToggle />
-          <div className="muted small" style={{ marginTop: 10 }}>
-            v0.1 · local pipeline
-            <br />
-            docling · gliner2 · llm
+          <div className="sidebar-credits">
+            <div className="sidebar-credit-line">
+              From the{" "}
+              <a href="https://nexus-score.vercel.app/" target="_blank" rel="noreferrer">
+                Nexus-score team
+              </a>
+            </div>
+            <div className="sidebar-credit-line muted">
+              <a href="https://github.com/aadivar/metadata_gapfixer" target="_blank" rel="noreferrer">
+                Source on GitHub
+              </a>
+            </div>
+            <div className="sidebar-credit-line muted">
+              <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noreferrer">
+                AGPL-v3
+              </a>
+            </div>
           </div>
         </div>
       </aside>

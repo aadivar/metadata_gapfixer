@@ -20,6 +20,20 @@ class OpenAlexClient(HttpEnricher):
         data = self._get("works", params=params)
         return [_compact_work(w) for w in (data or {}).get("results", [])]
 
+    def work_concepts(self, doi: str | None = None, openalex_id: str | None = None,
+                      top_n: int = 8) -> list[dict[str, Any]]:
+        """Return the paper's top OpenAlex concepts: [{display_name, score, level}, ...].
+
+        Free, cached. Use either a DOI or an OpenAlex work ID."""
+        if doi:
+            payload = self._get(f"works/doi:{doi}")
+        elif openalex_id:
+            wid = openalex_id.replace("https://openalex.org/", "")
+            payload = self._get(f"works/{wid}")
+        else:
+            return []
+        return _compact_concepts((payload or {}).get("concepts"), top_n)
+
     def search_author(self, name: str, affiliation: str | None = None,
                       max_results: int = 5) -> list[dict[str, Any]]:
         params = {"search": name, "per-page": max_results}
@@ -35,6 +49,19 @@ class OpenAlexClient(HttpEnricher):
              "doi": f.get("ids", {}).get("doi"), "country": f.get("country_code")}
             for f in (data or {}).get("results", [])
         ]
+
+
+def _compact_concepts(concepts: list[dict] | None, top_n: int) -> list[dict]:
+    if not concepts:
+        return []
+    out = []
+    for c in concepts[:top_n]:
+        out.append({
+            "display_name": c.get("display_name"),
+            "score": round(float(c.get("score") or 0.0), 3),
+            "level": c.get("level"),
+        })
+    return out
 
 
 def _compact_work(w: dict | None) -> dict:
@@ -55,6 +82,7 @@ def _compact_work(w: dict | None) -> dict:
         ],
         "host_venue": (w.get("primary_location") or {}).get("source", {}).get("display_name"),
         "issn_l": (w.get("primary_location") or {}).get("source", {}).get("issn_l"),
+        "concepts": _compact_concepts(w.get("concepts"), 8),
     }
 
 
@@ -67,4 +95,5 @@ def _compact_author(a: dict) -> dict:
         "works_count": a.get("works_count"),
         "institution": inst.get("display_name"),
         "ror": inst.get("ror"),
+        "top_concepts": _compact_concepts(a.get("x_concepts"), 5),
     }

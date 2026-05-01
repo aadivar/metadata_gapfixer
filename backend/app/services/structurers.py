@@ -520,12 +520,94 @@ def _find_credit_section(docling_doc: dict) -> str | None:
     return text[:3000] if text else None
 
 
+# Verbs that strongly indicate a CRediT-style attribution sentence
+_CREDIT_VERBS = (
+    r"designed|conceived|conceptualized|performed|carried out|conducted|"
+    r"investigated|collected|acquired|analyzed|analysed|interpreted|wrote|"
+    r"drafted|edited|reviewed|revised|supervised|coordinated|managed|"
+    r"administered|funded|obtained funding|acquired funding|prepared|"
+    r"contributed|curated|visualized|developed software|programmed|validated"
+)
+
+
+def _find_credit_paragraphs(docling_doc: dict, fs: Factsheet) -> str | None:
+    """Heuristic fallback: find paragraphs that *look* like CRediT attribution
+    prose even when there's no 'Author contributions' heading.
+
+    Strategy: scan the markdown for paragraphs that start with an initial-list
+    pattern ("MS, AB and CD …") OR contain ≥ 2 CRediT verbs and ≥ 1 author
+    initial token. Concatenate the matching paragraphs."""
+    md = docling_doc.get("markdown") or ""
+    if not md:
+        return None
+
+    # Build the set of author-initial tokens to look for ("MS", "VDA", etc.)
+    initials_set: set[str] = set()
+    for a in (fs.authors or []):
+        full = (a.name or f"{a.given or ''} {a.surname or ''}").strip()
+        ini = "".join(w[0].upper() for w in full.split() if w and w[0].isalpha())
+        if 2 <= len(ini) <= 5:
+            initials_set.add(ini)
+    if not initials_set:
+        return None
+
+    initials_re = re.compile(
+        r"\b(" + "|".join(re.escape(i) for i in initials_set) + r")\b"
+    )
+    verbs_re = re.compile(rf"\b(?:{_CREDIT_VERBS})\b", re.IGNORECASE)
+    starts_with_initials = re.compile(
+        r"^\s*(?:[A-Z]{2,5})(?:\s*[,&]?\s*(?:and\s+)?[A-Z]{2,5}){0,8}\s+"
+        rf"(?:{_CREDIT_VERBS})", re.IGNORECASE,
+    )
+
+    matches: list[str] = []
+    for para in re.split(r"\n\s*\n", md):
+        p = para.strip()
+        if not p or len(p) < 40 or len(p) > 4000:
+            continue
+        if starts_with_initials.match(p):
+            matches.append(p)
+            continue
+        if len(verbs_re.findall(p)) >= 2 and initials_re.search(p):
+            matches.append(p)
+        if sum(len(m) for m in matches) > 3000:
+            break
+    if not matches:
+        return None
+    joined = re.sub(r"\s+", " ", "\n\n".join(matches)).strip()
+    return joined[:3000] or None
+
+
 def structure_credit(meta: dict, fs: Factsheet, docling_doc: dict, *,
-                     sub_id: int | None = None) -> dict:
-    """LLM mapping of an Author Contributions section to CRediT roles per author."""
-    credit_text = _find_credit_section(docling_doc)
+                     sub_id: int | None = None,
+                     text_override: str | None = None) -> dict:
+    """LLM mapping of an Author Contributions section to CRediT roles per author.
+
+    Source-text resolution order:
+      1. `text_override`  — when the editor has used Locate to point at a
+         paragraph (highest precedence; trusts the editor's selection).
+      2. `_find_credit_section` — markdown scan for an explicit heading.
+      3. `_find_credit_paragraphs` — heuristic body scan for prose that looks
+         like CRediT attributions even without a heading.
+    """
+    credit_text: str | None = None
+    source_method = ""
+    if text_override and text_override.strip():
+        credit_text = re.sub(r"\s+", " ", text_override).strip()[:3000]
+        source_method = "editor_selection"
     if not credit_text:
-        return {"ok": False, "error": "no Author Contributions section found"}
+        credit_text = _find_credit_section(docling_doc)
+        if credit_text:
+            source_method = "heading_section_walk"
+    if not credit_text:
+        credit_text = _find_credit_paragraphs(docling_doc, fs)
+        if credit_text:
+            source_method = "heuristic_paragraph_scan"
+    if not credit_text:
+        return {
+            "ok": False,
+            "error": "no Author Contributions text found — try Locate on the contribution paragraph and resubmit.",
+        }
 
     authors = meta.get("authors") or [a.model_dump() for a in fs.authors]
     author_index = []
@@ -570,15 +652,17 @@ def structure_credit(meta: dict, fs: Factsheet, docling_doc: dict, *,
     meta["credit_contributions"] = contributions
     meta.setdefault("provenance", {})["credit_contributions"] = {
         "source": "llm_structured",
-        "confidence": 0.9,
-        "reasoning": "Mapped from Author Contributions section using the 14-role CRediT taxonomy.",
+        "confidence": 0.9 if source_method == "heading_section_walk" else 0.75,
+        "reasoning": f"Mapped to the 14-role CRediT taxonomy (input via {source_method}).",
         "task": "structure_credit",
+        "input_method": source_method,
     }
 
     return {
         "ok": True, "task": "structure_credit",
         "contributors": len(contributions),
         "total_roles": sum(len(c["roles"]) for c in contributions),
+        "input_method": source_method,
     }
 
 
@@ -609,30 +693,52 @@ class VerifiedAuthor(BaseModel):
 
 _VERIFY_SYSTEM = """You are a scholarly author verification assistant.
 
-You will receive an author's name + affiliation(s) as they appear in a
-published paper, AND a dossier of candidate matches from THREE authoritative
-sources:
-  - ORCID (with each candidate's employment / education history)
-  - OpenAlex (with each candidate's work count, top institutions, country)
-  - ROR (with each candidate's preferred display name, country, type)
+You will receive:
+  1. The PAPER's signal — title, abstract excerpt, and OpenAlex `concepts`
+     (with score). These define the paper's research domain.
+  2. An author's name + affiliation(s) as they appear in this paper.
+  3. A dossier of candidate matches from THREE authoritative sources:
+     - ORCID (with each candidate's employment / education history)
+     - OpenAlex (with each candidate's work count, top institution, AND
+       their top_concepts — their own research domain)
+     - ROR (with each candidate's preferred display name, country, type)
 
-Cross-check across all three sources. Return a verified_orcid, an openalex_id,
-a verified_ror per affiliation, an evidence_chain (2-4 short factual statements
-citing what aligned), and a confidence in [0,1].
+Cross-check across all three sources AND against the paper's topic. Return a
+verified_orcid, an openalex_id, a verified_ror per affiliation, an
+evidence_chain (2-4 short factual statements citing what aligned), and a
+confidence in [0,1].
+
+Topic-relevance rule (CRITICAL):
+- An OpenAlex candidate whose top_concepts have ZERO substantive overlap with
+  the paper's concepts is NOT the right person, EVEN IF the institution
+  matches — institutions are large and host researchers across many fields.
+  Reject such candidates with reason "topic_mismatch: paper is about X,
+  candidate's profile is about Y" and put them in alternatives_rejected.
+- Exception: if the candidate has no OpenAlex profile but ORCID employment
+  and dates align with the paper's likely domain (judged from the abstract),
+  you may still accept at confidence ≤ 0.85.
+- If two candidates both align on institution AND topic, prefer the one with
+  more recent activity and/or higher concept-overlap; cite the deciding
+  signal in evidence_chain.
 
 Confidence rules:
-- ≥ 0.9 requires evidence from at least 2 of the 3 sources (ORCID employment,
-  OpenAlex affiliation, ROR display-name match).
-- 0.7–0.9: one source matches strongly; another is plausible.
+- ≥ 0.9 requires evidence from ≥ 2 of the 3 sources (e.g. ORCID employment +
+  OpenAlex affiliation, OR OpenAlex affiliation + topic overlap > 0.4) AND
+  no contradicting signals.
+- 0.7–0.9: one source matches strongly with topic alignment; another is
+  plausible but weaker.
 - < 0.7: leave verified_orcid null; list candidates in alternatives_rejected
-  with concrete reasons.
+  with concrete reasons (cite topic mismatch, era mismatch, namesake-only,
+  etc.).
 
 Hard rules:
 - NEVER invent ORCIDs or RORs that are not in the candidate lists provided.
-- If a candidate's field of work is clearly different from the paper's domain
-  (e.g. computer science profile vs a chemistry paper), reject it with that
-  reason.
-- evidence_chain entries are SHORT factual lines, not generic praise."""
+- evidence_chain entries are SHORT factual lines (e.g. "ORCID 0000-… employed
+  at MIT 2018-present matches affiliation"; "candidate's top concept
+  'Cognitive Neuroscience' overlaps paper concept 'Working Memory'"), not
+  generic praise.
+- If multiple candidates share the same institution, the topic signal is the
+  tiebreaker — say so in evidence_chain."""
 
 
 def _author_initials(full_name: str) -> str:
@@ -689,6 +795,27 @@ def _ror_dossier(ror_client: RORClient, affil: str) -> list[dict]:
     return ror_client.search(affil)[:5]
 
 
+def _paper_context(meta: dict, fs: Factsheet, oa: OpenAlexClient) -> dict:
+    """Build the paper-level signal we send into verify_authors:
+    title, short abstract excerpt, and OpenAlex concepts (one cached call)."""
+    title = meta.get("title") or fs.title
+    abstract_full = meta.get("abstract") or fs.abstract or ""
+    abstract_excerpt = abstract_full.strip()[:600] if abstract_full else None
+    doi = meta.get("doi") or fs.doi
+    concepts: list[dict] = []
+    if doi:
+        try:
+            concepts = oa.work_concepts(doi=doi, top_n=8)
+        except Exception:
+            concepts = []
+    return {
+        "title": title,
+        "abstract_excerpt": abstract_excerpt,
+        "concepts": concepts,
+        "doi": doi,
+    }
+
+
 def verify_authors(meta: dict, fs: Factsheet, docling_doc: dict, *,
                    sub_id: int | None = None) -> dict:
     """Per-author multi-source verification (ORCID + OpenAlex + ROR). Updates
@@ -715,6 +842,9 @@ def verify_authors(meta: dict, fs: Factsheet, docling_doc: dict, *,
     oa = OpenAlexClient()
     ror = RORClient()
     router = router_for_submission(sub_id) if sub_id is not None else LLMRouter()
+
+    # Build paper-level context once (title + abstract + OpenAlex concepts)
+    paper_ctx = _paper_context(meta, fs, oa)
 
     # Cache ROR results per unique affiliation string
     ror_cache: dict[str, list[dict]] = {}
@@ -746,6 +876,7 @@ def verify_authors(meta: dict, fs: Factsheet, docling_doc: dict, *,
 
         # Single LLM call per author
         user_payload = json.dumps({
+            "paper": paper_ctx,
             "author": {"name": full, "given": given, "family": family,
                        "affiliations": affils, "is_corresponding": a.get("is_corresponding")},
             "orcid_candidates": orcid_dossier,
@@ -813,7 +944,8 @@ _TASK_TOKEN_ESTIMATES: dict[str, tuple[int, int, int]] = {
     "structure_references": (3_500, 2_000, 5),
     "structure_funding":    (1_000,   400, 1),
     "structure_credit":     (1_500,   500, 1),
-    "verify_authors":       (3_000,   800, 11),  # one call per author; assume ~11
+    "verify_authors":       (3_400,   800, 11),  # one call per author; assume ~11
+                                                  # +400 in prompt: paper title/abstract/concepts
 }
 
 _PRICE_MINI = (0.15 / 1_000_000, 0.60 / 1_000_000)  # (input, output) USD/token
@@ -853,11 +985,15 @@ STRUCTURERS = {
 
 
 def run_structurer(task: str, meta: dict, fs: Factsheet, docling_doc: dict, *,
-                   sub_id: int | None = None) -> dict:
+                   sub_id: int | None = None,
+                   text_override: str | None = None) -> dict:
     fn = STRUCTURERS.get(task)
     if not fn:
         return {"ok": False, "error": f"unknown structurer task: {task}"}
     try:
+        # Only structure_credit currently accepts text_override; others ignore it
+        if task == "structure_credit":
+            return fn(meta, fs, docling_doc, sub_id=sub_id, text_override=text_override)
         return fn(meta, fs, docling_doc, sub_id=sub_id)
     except Exception as exc:
         log.exception("structurer %s failed", task)

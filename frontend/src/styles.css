@@ -236,6 +236,24 @@ body::before { content: none; }
 .nav a.active .nav-icon { color: var(--fg-primary); }
 
 .sidebar-footer { margin-top: auto; padding: 10px; color: var(--fg-secondary); font-size: 11px; }
+.sidebar-credits {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--fg-secondary);
+  letter-spacing: 0.06px;
+}
+.sidebar-credits a {
+  color: var(--color-onyx-outline);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-onyx-outline) 30%, transparent);
+  transition: border-color var(--duration) var(--ease);
+}
+.sidebar-credits a:hover { border-bottom-color: var(--color-onyx-outline); }
+.sidebar-credit-line.muted { color: var(--fg-secondary); }
 .theme-toggle {
   width: 100%;
   display: flex;
@@ -917,8 +935,385 @@ td code { color: var(--color-onyx-outline); background: var(--accent-soft); padd
   word-break: break-word;
 }
 
+/* ─── Tier nav strip (sticky) ─── */
+.tier-nav {
+  display: flex;
+  gap: 6px;
+  /* Full-bleed across the .main scroll-port so nothing leaks above it.
+     Top -28px / padding-top 14px hides the .main { padding: 28px 40px }
+     gap; horizontal -40px / padding 40px stretches edge-to-edge of the
+     viewport so scrolling content can't peek around the corners. */
+  margin: -28px -40px 16px;
+  padding: 14px 40px;
+  background: var(--bg-base);
+  border: none;
+  border-bottom: 1px solid var(--border-default);
+  border-radius: 0;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+@media (max-width: 880px) {
+  .tier-nav { margin: -20px -20px 16px; padding: 12px 20px; }
+}
+.tier-nav-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  color: var(--fg-primary);
+  text-decoration: none;
+  font-size: 12px;
+  flex: 1;
+  min-width: 0;
+  transition: background-color var(--duration) var(--ease), border-color var(--duration) var(--ease);
+}
+.tier-nav-item:hover {
+  border-color: var(--color-onyx-outline);
+  color: var(--color-onyx-outline);
+}
+.tier-nav-code {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.06px;
+  padding: 1px 6px;
+  background: var(--bg-deep);
+  color: var(--fg-on-deep);
+  border-radius: var(--radius);
+}
+.tier-nav-label {
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: -0.08px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tier-nav-score {
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 /* ─── Per-tier sections + field cards ─── */
-.tier-section { padding: 20px; }
+.tier-section {
+  margin-bottom: 32px;
+  scroll-margin-top: 80px;        /* so anchor jumps clear the sticky tier-nav */
+}
+.tier-header {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 24px;
+  align-items: center;
+  padding: 16px 0 14px;
+  margin-bottom: 12px;
+  border-bottom: 2px solid var(--bg-deep);
+}
+.tier-header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+.tier-code {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.06px;
+  background: var(--bg-deep);
+  color: var(--fg-on-deep);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  flex-shrink: 0;
+}
+.tier-title {
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 500;
+  letter-spacing: -0.35px;
+  line-height: 1.2;
+  margin: 0;
+  color: var(--fg-primary);
+}
+.tier-desc {
+  margin: 2px 0 0;
+  color: var(--fg-secondary);
+}
+.tier-header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+  min-width: 220px;
+}
+.tier-score-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+.tier-score-num {
+  font-family: var(--font-display);
+  font-size: 36px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.45px;
+}
+.tier-score-pct {
+  font-size: 16px;
+  letter-spacing: 0;
+  margin-left: 2px;
+  color: var(--fg-secondary);
+}
+.tier-track-lg {
+  width: 110px;
+  height: 6px;
+  background: var(--bg-overlay);
+  border-radius: 0;
+  overflow: hidden;
+}
+.tier-fill-lg {
+  height: 100%;
+  transition: width 300ms var(--ease);
+}
+
+/* ─── Mandatory banner under hero text ─── */
+.mandatory-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  color: var(--fg-primary);
+  margin-bottom: 4px;
+}
+.mandatory-banner .mandatory-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-disabled);
+  flex-shrink: 0;
+}
+.mandatory-banner.is-ready {
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.mandatory-banner.is-ready .mandatory-dot { background: var(--ok); }
+.mandatory-banner.is-blocked {
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.mandatory-banner.is-blocked .mandatory-dot { background: var(--warn); }
+.mandatory-banner strong { font-family: var(--font-sans); font-weight: 600; }
+.mandatory-status { font-weight: 600; margin-left: auto; }
+
+/* ─── Dimension-section accents — Mandatory looks like a gate, the
+       five Research Nexus dimensions get their colour-coded edge. ─── */
+.dim-section.dim-mandatory .tier-header {
+  border-bottom-color: var(--warn);
+}
+.dim-section.dim-mandatory .tier-code-gate {
+  background: var(--warn);
+  color: #fff;
+}
+
+/* Tier code variants — show "GATE" or weight % */
+.tier-code-gate {
+  background: var(--warn);
+  color: #fff;
+}
+
+/* In-section entity-count strip (replaces the standalone Research Nexus
+   summary card — each dimension owns its own progress story). */
+.dim-pillar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+}
+.dim-pillar .nexus-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-disabled);
+  flex-shrink: 0;
+}
+.dim-pillar-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.dim-pillar-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+.dim-pillar-caption {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--fg-primary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dim-pillar-frac { flex-shrink: 0; font-family: var(--font-mono); font-weight: 600; color: var(--fg-secondary); }
+.dim-pillar.nexus-partial { border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+.dim-pillar.nexus-partial .nexus-dot { background: var(--warn); }
+.dim-pillar.nexus-partial .nexus-pillar-fill { background: var(--warn); }
+.dim-pillar.nexus-complete {
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  background: var(--ok-soft);
+}
+.dim-pillar.nexus-complete .nexus-dot { background: var(--ok); }
+.dim-pillar.nexus-complete .nexus-pillar-fill { background: var(--ok); }
+.dim-pillar.nexus-complete .dim-pillar-frac { color: var(--ok); }
+.dim-pillar.nexus-empty .nexus-pillar-fill { background: var(--fg-disabled); }
+
+/* ─── Research Nexus pillars (T2) ─── */
+.nexus-pillars {
+  margin: 6px 0 16px;
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+.nexus-pillars-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.nexus-pillars-head h4 {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06px;
+  font-weight: 600;
+  color: var(--fg-secondary);
+}
+.nexus-pillar-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 6px;
+}
+.nexus-pillar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  font-size: 12px;
+}
+.nexus-pillar-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.nexus-pillar .nexus-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-disabled);
+  flex-shrink: 0;
+}
+.nexus-pillar-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-primary);
+  font-weight: 500;
+}
+.nexus-pillar-frac {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  color: var(--fg-secondary);
+  font-weight: 600;
+}
+.nexus-pillar-track {
+  height: 4px;
+  background: var(--bg-overlay);
+  border-radius: 0;
+  overflow: hidden;
+}
+.nexus-pillar-fill {
+  height: 100%;
+  background: var(--fg-disabled);
+  transition: width 300ms var(--ease);
+}
+.nexus-pillar-caption {
+  font-size: 11px;
+  margin: 0;
+  font-family: var(--font-mono);
+  color: var(--fg-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Status-driven colours */
+.nexus-pillar.nexus-empty .nexus-dot { background: var(--fg-disabled); }
+.nexus-pillar.nexus-empty .nexus-pillar-fill { background: var(--fg-disabled); }
+.nexus-pillar.nexus-not_applicable {
+  opacity: 0.55;
+  border-style: dashed;
+}
+.nexus-pillar.nexus-not_applicable .nexus-dot { background: var(--fg-disabled); }
+.nexus-pillar.nexus-partial {
+  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+}
+.nexus-pillar.nexus-partial .nexus-dot { background: var(--warn); }
+.nexus-pillar.nexus-partial .nexus-pillar-fill { background: var(--warn); }
+.nexus-pillar.nexus-complete {
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  background: var(--ok-soft);
+}
+.nexus-pillar.nexus-complete .nexus-dot { background: var(--ok); }
+.nexus-pillar.nexus-complete .nexus-pillar-fill { background: var(--ok); }
+.nexus-pillar.nexus-complete .nexus-pillar-frac { color: var(--ok); }
+
+.tier-bucket {
+  margin-top: 12px;
+}
+.tier-bucket-title {
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06px;
+  text-transform: uppercase;
+  color: var(--fg-secondary);
+  margin: 0 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tier-bucket-title .mono {
+  background: var(--bg-elevated);
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-weight: 500;
+}
+
 .tier-badge {
   display: inline-block;
   padding: 1px 8px;
@@ -1229,6 +1624,74 @@ td code { color: var(--color-onyx-outline); background: var(--accent-soft); padd
 .mode-btn.mode-affils  { color: var(--color-forest-green-action); }
 .mode-btn.active.mode-authors { background: var(--accent-soft); border-color: var(--color-onyx-outline); }
 .mode-btn.active.mode-affils  { background: var(--ok-soft); border-color: var(--color-forest-green-action); }
+
+/* ─── Inline CRediT contributions view ─── */
+.credit-contribs {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+.credit-author-rows {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.credit-author-row {
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+.credit-author-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.credit-author-name {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--fg-primary);
+  letter-spacing: -0.08px;
+}
+.credit-initials {
+  background: var(--bg-deep);
+  color: var(--fg-on-deep);
+  border-color: var(--bg-deep);
+}
+.credit-role-rows {
+  list-style: none;
+  padding: 0 0 0 4px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.credit-role-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.chip-credit {
+  color: var(--color-onyx-outline);
+  border-color: color-mix(in srgb, var(--color-onyx-outline) 30%, transparent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.credit-evidence {
+  font-style: italic;
+  color: var(--fg-secondary);
+  flex: 1;
+  min-width: 0;
+}
 
 /* ─── Inline LocatePanel ─── */
 .locate-panel {

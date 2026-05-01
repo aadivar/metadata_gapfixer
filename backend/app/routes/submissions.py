@@ -709,9 +709,20 @@ def post_enrich_all(sub_id: int):
     return {"reports": reports, "score": score(fs, meta).model_dump()}
 
 
+class StructureRequest(BaseModel):
+    text_override: str | None = None  # editor-located source text (currently
+                                      # honoured by structure_credit only)
+
+
 @router.post("/{sub_id}/structure/{task}")
-def post_structure(sub_id: int, task: str):
-    """Run one LLM structurer for this submission. PAID — recorded in cost ledger."""
+def post_structure(sub_id: int, task: str,
+                   req: StructureRequest | None = Body(default=None)):
+    """Run one LLM structurer for this submission. PAID — recorded in cost ledger.
+
+    Optional body: `{"text_override": "..."}` lets the editor supply the
+    source text directly (e.g. after using Locate to point at the
+    Author Contributions paragraph). Only `structure_credit` honours
+    this today; other tasks ignore it harmlessly."""
     from ..services.scoring import score
     from ..services.structurers import run_structurer, STRUCTURERS
 
@@ -726,7 +737,9 @@ def post_structure(sub_id: int, task: str):
             raise HTTPException(404, "not parsed yet")
         docling_doc = json.loads(Path(sub.docling_json_path).read_text())
 
-    report = run_structurer(task, meta, fs, docling_doc, sub_id=sub_id)
+    text_override = req.text_override if req else None
+    report = run_structurer(task, meta, fs, docling_doc, sub_id=sub_id,
+                            text_override=text_override)
     if report.get("ok"):
         _save_metadata(sub_id, meta)
     return {"report": report, "score": score(fs, meta).model_dump()}

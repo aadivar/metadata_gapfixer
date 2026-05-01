@@ -158,14 +158,26 @@ export function xmlDownloadUrl(id: number): string {
 // ───────────────────────── Scorecard / autofix ─────────────────────────
 
 export type Tier = "T0" | "T1" | "T2" | "T3";
+export type Dimension = "mandatory" | "provenance" | "people" | "funding" | "access" | "organizations";
 export type Bucket = "high" | "medium" | "manual";
 
 export type Leverage = "deterministic" | "api" | "ai";
+
+export type DimensionScore = {
+  key: Dimension;
+  label: string;
+  weight: number;
+  score: number;
+  fields_present: number;
+  fields_total: number;
+  description: string;
+};
 
 export type FieldScore = {
   key: string;
   label: string;
   tier: Tier;
+  dimension?: Dimension;
   weight: number;
   bucket: Bucket;
   status: "present" | "missing";
@@ -174,6 +186,7 @@ export type FieldScore = {
   why: string;
   llm_leverage?: Leverage;
   ai_cost_estimate?: number;
+  structurer_task?: string | null;
   provenance_source?: string | null;
   provenance_confidence?: number | null;
   provenance_confirmed?: boolean;
@@ -197,6 +210,21 @@ export type TierScore = {
   breakdown?: TierBreakdown;
 };
 
+export type NexusPillar = {
+  key: "researchers" | "funders" | "organizations" | "outputs";
+  label: string;
+  numerator: number;
+  denominator: number;
+  caption: string;
+  status: "complete" | "partial" | "empty" | "not_applicable";
+};
+export type ResearchNexus = {
+  pillars: NexusPillar[];
+  pillars_complete: number;
+  pillars_started: number;
+  overall_pct: number;
+};
+
 export type Scorecard = {
   composite: number;
   interpretation: string;
@@ -207,6 +235,12 @@ export type Scorecard = {
   manual: FieldScore[];
   facts_summary: Record<string, any>;
   estimated_full_enrichment_usd?: number;
+  research_nexus?: ResearchNexus;
+  dimensions?: DimensionScore[];
+  mandatory_ready?: boolean;
+  mandatory_present?: number;
+  mandatory_total?: number;
+  research_nexus_score?: number;
 };
 
 export async function enrichAll(id: number): Promise<{ reports: any[]; score: Scorecard }> {
@@ -240,6 +274,19 @@ export async function autofixAll(id: number): Promise<{ reports: any[]; score: S
 export async function getCost(id: number): Promise<{ total_usd: number; calls: any[] }> {
   const r = await fetch(`${API}/submissions/${id}/cost`);
   if (!r.ok) throw new Error(`cost failed: ${r.status}`);
+  return r.json();
+}
+
+export async function runStructurer(
+  id: number, task: string, opts?: { text_override?: string }
+): Promise<{ report: any; score: Scorecard }> {
+  const init: RequestInit = { method: "POST" };
+  if (opts?.text_override) {
+    init.headers = { "Content-Type": "application/json" };
+    init.body = JSON.stringify({ text_override: opts.text_override });
+  }
+  const r = await fetch(`${API}/submissions/${id}/structure/${task}`, init);
+  if (!r.ok) throw new Error(`structure ${task} failed: ${r.status} ${await r.text()}`);
   return r.json();
 }
 

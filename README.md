@@ -1,31 +1,51 @@
-# Metadata Gap Fixer
+# Metadata Generator
 
 A local diagnostic tool that turns a journal article PDF/DOCX into a
-**metadata completeness scorecard** plus a Crossref-ready DOI submission XML.
+**Research Nexus completeness scorecard** plus a Crossref-ready DOI
+submission XML. It runs the document through layout analysis, deterministic
+extraction, free identifier-registry lookups, and opt-in AI enrichment, and
+shows you in one screen exactly which integrity-relevant fields are
+present, which can be auto-filled, and which need editorial input — with
+running cost in USD for every paid LLM call.
 
-The pitch: editors and publishers don't always know what their record is
-missing. Most existing deposit forms accept whatever you give them and
-silently produce thin metadata. This tool runs the document through layout
-analysis + deterministic extraction + opt-in AI enrichment and shows you,
-in one screen, exactly which integrity-relevant fields are present, which
-can be auto-filled, and which need editorial input — with running cost in
-USD for every paid LLM call.
+A follow-up to the Crossref Research Nexus Score visualised at
+**[nexus-score.vercel.app](https://nexus-score.vercel.app/)**. Where the
+score tells you *what's missing*, this tool helps you *fix it*.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│  Metadata completeness                                             │
-│   ┌────┐    Depositable, but the record is invisible to most       │
-│   │ 47 │    cross-system linking.                                  │
-│   │/100│                                                           │
-│   └────┘                                                           │
-│   T0  Depositable        ████████  100%   Crossref required        │
-│   T1  Discoverable       ████░░░░   42%   Crossref recommended     │
-│   T2  Linkable           █░░░░░░░   13%   Nexus benchmarks         │
-│   T3  Integrity-grade    ░░░░░░░░    0%   Crossref+DataCite guide  │
+│  47   RESEARCH NEXUS                                               │
+│       Mandatory: 9/9 · Depositable                                 │
 │                                                                    │
-│   [⚡ Auto-fix everything (12 high-impact)]   [Generate XML]       │
+│   25%  Provenance       █░░░░░░░   13%                             │
+│   20%  People           ████░░░░   60%                             │
+│   20%  Funding          ░░░░░░░░    0%                             │
+│   20%  Access           ███████░   80%                             │
+│   15%  Organizations    █████░░░   70%                             │
+│                                                                    │
+│   [Run automated extraction]  [Run AI enrichment ~$0.025]          │
 └────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Categorisation: one Mandatory gate + five Research Nexus dimensions
+
+Aligned with the **[Crossref Research Nexus](https://www.crossref.org/research-nexus/)**
+framing and the weighting used by **[nexus-score.vercel.app](https://nexus-score.vercel.app/)**.
+
+| Bucket | Weight | What it covers |
+|---|---|---|
+| **Mandatory** | gate | DOI, title, journal, ISSN, year, ≥1 author, full pub date, vol/issue/pages, copyright. The Crossref deposit minimum — must be satisfied before deposit. |
+| **Provenance** | 25% | References, refs-with-DOI, preprint→VoR link, Crossmark, conflict-of-interest, data/code availability. |
+| **People** | 20% | Full author names, ORCID for corresponding author, ORCID for every author, CRediT contributor roles. |
+| **Funding** | 20% | Funder Registry DOI, award/grant numbers. |
+| **Access** | 20% | Abstract (plain + JATS), license, OA indicator, plain-language summary. |
+| **Organizations** | 15% | Affiliations extracted, ROR for every affiliation. |
+
+The hero **Research Nexus score** is the weight-averaged percentage across
+the five dimensions. The Mandatory gate decides whether the record is
+depositable at all.
 
 ---
 
@@ -37,33 +57,16 @@ Five layers, each layered on the one below:
 |---|---|---|---|
 | **L0 · Docling layout** | PDF/DOCX → structured JSON + per-element bboxes + page renders | $0 | Always (parse stage) |
 | **L1 · Deterministic factsheet** | Regex sweep (DOI / ORCID / ROR / ISSN / arXiv / license / grant patterns / preprint DOIs) + PDF /Info + header parser (authors + affiliation marker map) + boilerplate anchor matching (funding / CoI / data availability / ethics) | $0 | Always (parse stage) |
-| **L2 · Free enricher APIs** | ORCID public API · ROR v2 · OpenAlex (works/authors/funders) · Crossref REST. Single-candidate hits filled directly; multi-candidate hits stored as `needs_pick` with the candidate list attached. | $0 | Auto-fix (publisher click) |
-| **L3 · LLM picker** | When the editor explicitly opts in, runs ONE structured-output call per ambiguous field that picks among the API-returned candidates with reasoning + confidence. | ~$0.0002/call | Per-field "✨ Adjudicate with AI" or bulk |
-| **L4 · LLM structurer** | Higher-leverage: takes a raw content region + (optionally) seed candidates and returns a clean structured record. Four named tasks: `structure_authors`, `structure_references`, `structure_funding`, `structure_credit`. | ~$0.0003 – $0.009/call | Per-section "🧠 Structure with AI" |
+| **L2 · Free enricher APIs** | ORCID public API · ROR v2 · OpenAlex · Crossref REST. Now with affiliation normalisation (Solr-style alternatives, `Indian Institute of Technology, Delhi → Indian Institute of Technology Delhi`), name-swap fallback for Indian/Telugu profiles, and ROR clear-winner auto-accept (top score ≥ 0.95 with 0.10+ margin). | $0 | Auto-fix (publisher click) |
+| **L3 · LLM picker** | When the editor explicitly opts in, runs ONE structured-output call per ambiguous field that picks among the API-returned candidates with reasoning + confidence. | ~$0.0002/call | Per-field "Adjudicate with AI" |
+| **L4 · LLM structurer** | Higher-leverage: takes a raw content region (or editor-located text via `text_override`) and returns a clean structured record. Five named tasks: `structure_authors`, `structure_references`, `structure_funding`, `structure_credit`, `verify_authors`. The verifier now also receives the paper's title + abstract excerpt + OpenAlex concepts so it can reject candidates whose research domain doesn't match. | ~$0.0003 – $0.013/call | Per-field "Identify on document" with AI cost meta-pill |
 
-Cost rule: **the LLM is never called automatically**. Every paid call is the
-publisher's deliberate choice and is recorded in a per-submission USD ledger.
+**Cost rule**: the LLM is never called automatically. Every paid call is
+the publisher's deliberate choice and is recorded in a per-submission USD
+ledger.
 
-For a typical paper, full premium processing tops out around **$0.025**, well
-under the configurable $1 ceiling. Standard auto-fix (no LLM) is **$0**.
-
----
-
-## Tier rubric
-
-The composite score is weighted across four published tiers — each one
-references a real spec or guideline so editors can map the score to
-external benchmarks they already know:
-
-| Tier | Anchor | What it represents |
-|---|---|---|
-| **T0 · Depositable** | [Crossref schema 5.4.0 required](https://data.crossref.org/reports/help/schema_doc/5.4.0/index.html) | Without these, you literally cannot deposit. |
-| **T1 · Discoverable** | Crossref schema recommended | What makes the record usable to indexers. |
-| **T2 · Linkable** | [Crossref Participation Reports / Nexus](https://www.crossref.org/members/prep/) | What enables ORCID, ROR, Funder Registry, citation-graph linking. |
-| **T3 · Integrity-grade** | [Why metadata matters for research integrity (Crossref + DataCite, 2026)](https://zenodo.org/records/19695957) | Preprint relations, Crossmark, CRediT roles, data/code availability. |
-
-Field weights and tier weights live in `backend/app/services/scoring.py` and
-are easy to customise per publisher.
+For a typical paper, full premium processing tops out around **$0.025**.
+Standard auto-fix (no LLM) is **$0**.
 
 ---
 
@@ -77,20 +80,23 @@ are easy to customise per publisher.
      PDF points → image pixels for the layout overlay.
    - `factsheet.py` runs the deterministic L1 extraction.
 3. **Score** is computed on demand from the factsheet + saved metadata.
-   Returned by `GET /submissions/{id}/score`.
+   Returned by `GET /submissions/{id}/score` — includes per-dimension
+   scores, the Research Nexus weighted score, the Mandatory gate state,
+   and the entity-count pillars (e.g. `7/9 authors with ORCID`,
+   `3/8 affiliations with ROR`).
 4. **Auto-fix** (free, deterministic):
-   - `POST /submissions/{id}/autofix` `{action}` — one fixer
-   - `POST /submissions/{id}/autofix/all` — every high-impact fixer
-5. **Pick / adjudicate** ambiguous candidates:
-   - `POST /submissions/{id}/pick` `{field_path, chosen_id}` — manual, free
-   - `POST /submissions/{id}/disambiguate/estimate` `{field_path?}` — preview USD cost
-   - `POST /submissions/{id}/disambiguate` `{field_path? | field_paths?}` — opt-in LLM pick
-6. **Structure messy regions** with LLM:
-   - `GET  /submissions/structure/estimate` — global cost preview
-   - `POST /submissions/{id}/structure/{task}/estimate`
-   - `POST /submissions/{id}/structure/{task}` — `structure_authors` |
-     `structure_references` | `structure_funding` | `structure_credit`
-7. **Generate XML** — `POST /submissions/{id}/xml` builds, `GET /submissions/{id}/xml` downloads.
+   - `POST /submissions/{id}/autofix/all` runs every high-impact fixer
+     in one click (the hero CTA).
+5. **Identify on document** (the unified per-field action when something
+   is missing): editor selects boxes containing the value; the backend
+   transparently routes to either field-aware regex (for deterministic
+   fields) or the LLM structurer with `text_override` (for AI-leverage
+   fields), with an upfront cost-confirm dialog.
+6. **Confirm / Reject** — `POST /submissions/{id}/confirm` flips
+   `provenance.confirmed=true`; `POST .../reject` flips back to
+   `needs_locate` to prompt re-identification.
+7. **Generate XML** — `POST /submissions/{id}/xml` builds, `GET .../xml`
+   downloads.
 
 ---
 
@@ -103,28 +109,29 @@ are easy to customise per publisher.
 | `GET`  | `/submissions/{id}` | Status of one submission |
 | `DELETE` | `/submissions/{id}` | Remove submission + all generated files |
 | `GET`  | `/submissions/{id}/factsheet` | Deterministic L1 output |
-| `GET`  | `/submissions/{id}/score` | Tier rubric + gap buckets |
+| `GET`  | `/submissions/{id}/score` | Dimension rubric + Research Nexus score + entity pillars |
 | `GET`  | `/submissions/{id}/sections` | Layout-derived sections |
 | `GET`  | `/submissions/{id}/sections/{n}` | One section with full text |
 | `GET`  | `/submissions/{id}/markdown` | Full Docling markdown |
 | `GET`  | `/submissions/{id}/pages` | Per-page render dimensions |
 | `GET`  | `/submissions/{id}/pages/{n}/image` | Page PNG |
 | `GET`  | `/submissions/{id}/pages/{n}/boxes` | Per-page Docling bboxes + text |
+| `GET`  | `/submissions/{id}/references_layout` | Three-tier references detection result |
 | `GET`  | `/submissions/{id}/provenance` | Per-field source / confidence / reasoning |
 | `GET`  | `/submissions/{id}/cost` | LLM cost ledger for this submission |
+| `GET`  | `/submissions/{id}/metadata` | Saved metadata JSON |
+| `PUT`  | `/submissions/{id}/metadata` | Save edited metadata |
 | `POST` | `/submissions/{id}/autofix` | One deterministic fixer (free) |
 | `POST` | `/submissions/{id}/autofix/all` | Run every high-impact fixer (free) |
 | `POST` | `/submissions/{id}/pick` | Manual editor pick from candidate list (free) |
 | `POST` | `/submissions/{id}/disambiguate/estimate` | Preview LLM cost (free) |
 | `POST` | `/submissions/{id}/disambiguate` | Opt-in LLM picker (~$0.0002/call) |
-| `GET`  | `/submissions/structure/estimate` | All structurer tasks' costs |
 | `POST` | `/submissions/{id}/structure/{task}/estimate` | Per-task cost preview |
-| `POST` | `/submissions/{id}/structure/{task}` | Opt-in LLM structurer |
-| `POST` | `/submissions/{id}/ner` | On-demand GLiNER2 NER on a text block |
-| `GET`  | `/submissions/presets/labels` | NER label presets per zone |
-| `GET`  | `/submissions/{id}/metadata` | Saved metadata JSON |
-| `PUT`  | `/submissions/{id}/metadata` | Save edited metadata |
-| `POST` | `/submissions/{id}/reconcile` | Legacy tool-calling agent (premium, single button) |
+| `POST` | `/submissions/{id}/structure/{task}` | Opt-in LLM structurer; optional body `{"text_override": "..."}` for editor-located source text |
+| `POST` | `/submissions/{id}/enrich/all` | Run all premium structurers in sequence |
+| `POST` | `/submissions/{id}/confirm` | Editor confirms a field |
+| `POST` | `/submissions/{id}/reject` | Editor rejects a field → `needs_locate` |
+| `POST` | `/submissions/{id}/locate` | Editor pointed to box(es); regex extraction for deterministic fields |
 | `POST` | `/submissions/{id}/xml` | Build Crossref XML |
 | `GET`  | `/submissions/{id}/xml` | Download XML |
 
@@ -132,29 +139,49 @@ are easy to customise per publisher.
 
 ## GUI
 
-Vite + React + react-router. Two pages:
+Vite + React + react-router. Restrained scholarly palette
+(parchment / inkwell / muted-stone / onyx-orange accent), shadcn-style
+icons (lucide), Lato body + JetBrains Mono code, 4/8px radii, compact
+density. Light is the canonical theme; dark is a derived inverse.
 
-- **Submissions** (`/upload`) — drag-and-drop dropzone, status pills with
-  animated dots for in-flight states, per-row delete button.
-- **Review** (`/review/:id`) — scorecard hero (composite + four tier bars
-  + interpretation), three gap buckets (high impact / medium / manual)
-  with per-field Fix buttons, "What we found" panel with the factsheet
-  contents, optional metadata JSON editor, optional premium reconcile
-  button, generate-XML + download.
-- **Inspect** (`/inspect/:id`) — demoted layout / sections explorer for
-  drilling into specific PDF regions when the scorecard looks wrong.
-  Click bboxes on the page render to multi-select, run NER on the
-  combined text.
+Two pages:
 
-Light/dark theme respects the OS preference and persists to `localStorage`
-under `mgf.theme`. Toggle in the sidebar footer.
+- **Submissions** (`/upload`) — drag-and-drop dropzone, status pills,
+  per-row delete.
+- **Review** (`/review/:id`) — top-to-bottom flow:
+  1. **Hero** — Research Nexus score (weighted), Mandatory gate banner
+     ("9/9 fields · Depositable" or "Not yet depositable"), five
+     dimension bars with weight labels, action buttons (`Run automated
+     extraction` · `Run AI enrichment ~$0.0NN` · `Generate Crossref XML`).
+  2. **Sticky dimension nav** — chip per dimension with current score, jumps to that section.
+  3. **Per-dimension sections** — Mandatory, then Provenance / People /
+     Funding / Access / Organizations. Each has a strong header (weight
+     badge, title, description, score number, progress bar), a
+     dimension-owned entity-progress strip when applicable (e.g. People
+     shows "7/9 authors with ORCID"), and field cards split into two
+     sub-buckets:
+     - **Needs attention** — everything not confirmed
+     - **Confirmed** — green-edged cards collapsed beneath
+  4. **Field cards** — each card is collapsed by default; click to expand
+     the detail panel showing the structured data inline:
+     - Author-related fields (full names, ORCIDs, affiliations, RORs)
+       expand to show a per-author list with ORCID / ROR / affiliation
+       chips and AI evidence chains.
+     - CRediT contributor roles expand to show per-author roles with
+       evidence quotes from the contribution paragraph and confidence %.
+- **Step-by-step CTAs**: at most one primary action per state. Missing
+  fields show a single `Identify on document` button (with cost
+  meta-pill if AI-leverage). Pending fields show `Confirm` / `Reject`.
+  Confirmed fields show only `Reject and re-identify`. The hero owns
+  the global `Run automated extraction` (free pass) and `Run AI
+  enrichment` (priced pass) buttons.
 
 ---
 
 ## Quick start
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/aadivar/metadata_gapfixer
 cd metadata_gapfixer
 cp .env.example .env                # edit OPENAI_API_KEY + CONTACT_EMAIL
 docker compose up -d --build
@@ -166,14 +193,11 @@ First boot downloads:
 - `ghcr.io/docling-project/docling-serve:latest` (~2 GB)
 - GLiNER2 (`fastino/gliner2-large-v1`) into `./data/hf-cache/` (~1.4 GB)
 
-Pre-warm GLiNER2 to avoid the wait on the first NER call:
-
-```bash
-docker compose exec backend python -c \
-  "from gliner2 import GLiNER2; GLiNER2.from_pretrained('fastino/gliner2-large-v1')"
-```
-
 Tail logs with `docker compose logs -f backend`.
+
+> **Set `CONTACT_EMAIL` in `.env`** — it's used in the User-Agent for
+> ORCID, ROR, OpenAlex, and Crossref polite-pool routing. Identified
+> clients get much higher rate limits.
 
 ---
 
@@ -188,12 +212,11 @@ provider (OpenAI, OpenRouter, Anthropic-compat, Groq, Ollama, LiteLLM).
 | `OPENAI_API_KEY` | *(required)* | Provider API key |
 | `OPENAI_MODEL` | `gpt-4o-mini` | Must support `response_format=json_schema` |
 | `GLINER_MODEL` | `fastino/gliner2-large-v1` | Use `fastino/gliner2-base-v1` (205M) on small hosts |
-| `CONTACT_EMAIL` | `anonymous@example.org` | Sent in User-Agent for ORCID/ROR/OpenAlex/Crossref polite pools |
+| `CONTACT_EMAIL` | `anonymous@example.org` | Sent in User-Agent for ORCID/ROR/OpenAlex/Crossref polite pools — **change this** |
 | `HF_TOKEN` | *(unset)* | Optional — higher rate limits on HuggingFace downloads |
 
 Per-task model routing lives in `backend/app/services/llm_router.py`'s
-`TASK_CONFIG` dict. Override individual tasks via env if you want
-`structure_references` on a flagship model and the rest on mini, etc.
+`TASK_CONFIG` dict.
 
 ---
 
@@ -217,18 +240,13 @@ data/
 └── mgf.db                        # SQLite — submissions table only
 ```
 
-**To swap storage** (S3, GCS, Azure Blob, NFS, etc.):
+**To swap storage** (S3, GCS, Azure Blob, NFS, etc.): bind-mount
+`./data/uploads` and `./data/outputs` to your network storage (works for
+any POSIX-mountable backend), and replace the SQLite engine in
+`backend/app/db.py` with a Postgres / MySQL URL — SQLModel speaks both.
 
-- Bind-mount or symlink `./data/uploads` and `./data/outputs` to your
-  network storage (works for any POSIX-mountable backend, e.g. `s3fs`,
-  `gcsfuse`, `azure-storage-fuse`, NFS, SMB).
-- Or replace the file I/O in `backend/app/pipeline.py` and
-  `backend/app/routes/submissions.py` with calls to your SDK of choice.
-- Replace the SQLite engine in `backend/app/db.py` with a Postgres / MySQL
-  URL — SQLModel already speaks both.
-
-We deliberately did *not* embed an S3 / cloud-specific client so the
-project stays portable. Pick what fits your infrastructure.
+We deliberately did not embed an S3 / cloud-specific client so the project
+stays portable. Pick what fits your infrastructure.
 
 ---
 
@@ -238,50 +256,34 @@ project stays portable. Pick what fits your infrastructure.
 metadata_gapfixer/
 ├── docker-compose.yml
 ├── .env.example
-├── README.md
+├── README.md  · DESIGN.md
+├── LICENSE                                   # AGPL-v3
 ├── backend/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── templates/journal_article.xml.j2     # Crossref 5.3.1 deposit XML
+│   ├── Dockerfile · requirements.txt
+│   ├── templates/journal_article.xml.j2
 │   └── app/
-│       ├── main.py                          # FastAPI app
-│       ├── config.py                        # env settings
-│       ├── db.py                            # SQLite + Submission model
-│       ├── models.py                        # JournalArticleMetadata + provenance
-│       ├── pipeline.py                      # parse → factsheet → render pages
+│       ├── main.py · config.py · db.py · models.py · pipeline.py
 │       ├── routes/
 │       │   ├── health.py
-│       │   └── submissions.py               # all the endpoints
+│       │   └── submissions.py
 │       └── services/
-│           ├── docling_client.py            # docling-serve HTTP client
-│           ├── page_render.py               # PyMuPDF → PNG + bbox extraction
-│           ├── sections.py                  # layout-aware section walker
-│           ├── factsheet.py                 # L1 deterministic extraction
-│           ├── ner.py                       # GLiNER2 (Inspect view only)
-│           ├── scoring.py                   # tier rubric + composite score
-│           ├── autofix.py                   # free deterministic fixers + needs_pick
-│           ├── llm_router.py                # per-task models + cost ledger + disambiguate
-│           ├── structurers.py               # four LLM structurers (authors/refs/funding/credit)
-│           ├── llm_agent.py                 # legacy tool-calling agent (premium)
-│           ├── crossref_xml.py              # Jinja2 → XML + lxml well-formedness
+│           ├── docling_client.py · page_render.py · sections.py
+│           ├── factsheet.py · ner.py
+│           ├── scoring.py                    # rubric + dimensions + Research Nexus score
+│           ├── autofix.py                    # free deterministic fixers + needs_pick
+│           ├── llm_router.py                 # per-task models + cost ledger
+│           ├── structurers.py                # five LLM structurers + paper-context aware verifier
+│           ├── crossref_xml.py
 │           └── enrichers/
-│               ├── _base.py                 # diskcache-backed httpx wrapper
-│               ├── orcid.py
-│               ├── ror.py
-│               ├── openalex.py
-│               └── crossref.py
+│               ├── _base.py · orcid.py · ror.py · openalex.py · crossref.py
+│               └── (ORCID name-swap, ROR comma-delete normalisation, etc.)
 └── frontend/
-    ├── Dockerfile
-    ├── package.json
+    ├── Dockerfile · package.json
     └── src/
-        ├── App.tsx                          # sidebar shell + theme toggle
-        ├── api.ts                           # typed API client
-        ├── theme.ts                         # light/dark + localStorage
-        ├── styles.css                       # design tokens, scorecard, dropzone
+        ├── App.tsx · api.ts · theme.ts · icons.tsx · styles.css
         └── pages/
-            ├── Upload.tsx                   # dropzone + submission list
-            ├── Review.tsx                   # scorecard + gap buckets + actions
-            └── Inspect.tsx                  # layout overlay + NER probe (demoted)
+            ├── Upload.tsx
+            └── Review.tsx                    # dimension-bucketed scorecard + step-by-step CTAs
 ```
 
 ---
@@ -289,20 +291,30 @@ metadata_gapfixer/
 ## Notes / caveats
 
 - **Journal articles only.** No book chapters, conference papers, datasets,
-  preprints (as deposit type). Preprint *relations* on a journal article are
-  supported via the `preprint_doi` field.
+  preprints (as deposit type). Preprint *relations* on a journal article
+  are supported via the `preprint_doi` field.
 - **No fabrication.** The LLM is constrained by structured outputs and
   explicit candidate lists. ORCIDs, DOIs, RORs, ISSNs come from APIs or
   PDF text — never made up.
+- **Topic-aware verification.** The `verify_authors` structurer now
+  receives the paper's title, abstract excerpt, and OpenAlex concepts,
+  and rejects candidates whose top concepts have zero overlap with the
+  paper — even when the institution matches.
 - **XML is well-formedness checked, not XSD-validated.** Run Crossref's
   XML validator (or `xmllint --schema crossref5.3.1.xsd ...`) before
-  deposit. The template targets schema 5.3.1; bumping to 5.4.0 is a
-  one-file change in `templates/journal_article.xml.j2`.
+  deposit. The template targets schema 5.3.1.
 - **LLM provider** must support OpenAI structured outputs (`response_format`
-  with `json_schema`). OpenAI, Anthropic-compat, OpenRouter, Groq, Together,
-  and recent Ollama all do. Check before swapping.
-- **Apple Silicon torch.** The Dockerfile pins CPU torch; if you want MPS
-  acceleration, run the backend natively (outside Docker) since Docker
-  cannot reach the M-series GPU.
-- **Dependency versions** are current as of April 2026 (FastAPI 0.136,
-  OpenAI SDK 2.33, Pydantic 2.13, lxml 6.1, SQLModel 0.0.38, GLiNER2 latest).
+  with `json_schema`).
+
+---
+
+## Credits
+
+Built by the team behind **[nexus-score.vercel.app](https://nexus-score.vercel.app/)**.
+Source on GitHub: <https://github.com/aadivar/metadata_gapfixer>.
+
+## License
+
+[AGPL-v3](https://www.gnu.org/licenses/agpl-3.0.html). If you run a
+modified version of this software on a network-accessible service, you
+must offer that modified source to the service's users.
