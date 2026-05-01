@@ -272,8 +272,11 @@ body::before { content: none; }
 .theme-toggle:hover { background: var(--bg-elevated); }
 .theme-toggle svg { flex-shrink: 0; color: var(--color-muted-stone); }
 
-.main { overflow-y: auto; padding: 28px 40px; }
-.main-inner { max-width: 1300px; margin: 0 auto; }
+/* Vertical padding moves into .main-inner so the scrollport's top edge
+   is flush with the viewport top — that's where sticky `top: 0` pins
+   to, so the tier-nav can't have content leaking above it. */
+.main { overflow-y: auto; padding: 0 40px; }
+.main-inner { max-width: 1300px; margin: 0 auto; padding: 28px 0 32px; }
 
 /* ============================================================
    Cards / surfaces
@@ -850,7 +853,8 @@ td code { color: var(--color-onyx-outline); background: var(--accent-soft); padd
 @media (max-width: 880px) {
   .shell { grid-template-columns: 1fr; }
   .sidebar { display: none; }
-  .main { padding: 20px; }
+  .main { padding: 0 20px; }
+  .main-inner { padding: 20px 0; }
   .layout-grid { grid-template-columns: 1fr; }
   .layout-side { position: static; }
 }
@@ -936,25 +940,19 @@ td code { color: var(--color-onyx-outline); background: var(--accent-soft); padd
 }
 
 /* ─── Tier nav strip (sticky) ─── */
+/* `.main`'s top padding is now 0 (moved into .main-inner above), so this
+   bar pins flush with the viewport top — no scroll-bleed above it. */
 .tier-nav {
-  display: flex;
-  gap: 6px;
-  /* Full-bleed across the .main scroll-port so nothing leaks above it.
-     Top -28px / padding-top 14px hides the .main { padding: 28px 40px }
-     gap; horizontal -40px / padding 40px stretches edge-to-edge of the
-     viewport so scrolling content can't peek around the corners. */
-  margin: -28px -40px 16px;
-  padding: 14px 40px;
-  background: var(--bg-base);
-  border: none;
-  border-bottom: 1px solid var(--border-default);
-  border-radius: 0;
   position: sticky;
   top: 0;
   z-index: 20;
-}
-@media (max-width: 880px) {
-  .tier-nav { margin: -20px -20px 16px; padding: 12px 20px; }
+  display: flex;
+  gap: 6px;
+  margin: 0 0 16px;
+  padding: 8px 6px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
 }
 .tier-nav-item {
   display: inline-flex;
