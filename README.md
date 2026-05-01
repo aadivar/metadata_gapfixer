@@ -308,6 +308,95 @@ metadata_gapfixer/
 
 ---
 
+## Roadmap
+
+Ordered roughly by impact-per-week-of-work for the editorial-tool use case.
+
+### Speed & throughput
+- **PDF layout memory.** Cache layout signatures (page geometry, text-block
+  fingerprints, header bbox, references-section detector results) per
+  publisher / per template. On the second paper from the same journal, the
+  parser short-circuits to the known regions instead of re-running detection
+  end-to-end. Today's three-tier references detector
+  (`services/references_layout.py`) is the first taste; generalise to
+  `authors_layout.py`, `funding_layout.py`, `crediting_layout.py`.
+- **Batch processing of multiple files.** Drop a directory or a ZIP of
+  PDFs at the dropzone (or `POST /batch`) and process N submissions in
+  parallel, with a single combined progress view and a single Crossref
+  XML bundle download. Same parse pipeline as the single-file flow,
+  shared HTTP cache, throughput-bounded by Docling-serve concurrency.
+- **CLI for backfill of older records.** A `mgf-cli ingest <path>` that
+  runs the parse + factsheet + free auto-fix end-to-end without the
+  GUI. Useful for re-processing a publisher's archive once
+  layout-aware detection improves, or for retrofitting metadata into
+  legacy DOIs that were deposited with thin records. Output: a JSON
+  report per file + the generated XML, written next to each PDF.
+
+### Editorial workflow
+- **Per-editor / per-journal preference storage.** Capture and replay
+  publisher policy fields that don't live in the PDF: Crossmark policy
+  URL, copyright holder, license-of-record default, depositor email,
+  preferred CRediT taxonomy version, archived-versions URL pattern,
+  funding-text → funder mapping rules. First time an editor sets these
+  for a journal (keyed by ISSN or DOI prefix), they're remembered for
+  every subsequent paper in that journal.
+- **`needs_pick` inline UI.** When ORCID or ROR returns N>1 candidates,
+  the data is already in `provenance` — render the candidate list inline
+  on the field card with [Pick] buttons (free) and an "Adjudicate with
+  AI · ~$0.0002" button. CLAUDE.md's next-slice item.
+- **Inter-paper consistency checks.** Across a single issue or volume,
+  flag inconsistencies the editor would otherwise miss — author name
+  variants for the same person across papers, mismatched affiliations,
+  inconsistent license, duplicate DOIs, drifted funder labels.
+- **Audit log per submission.** Append-only ledger of every editor
+  action (confirm, reject, pick, locate, AI call, manual edit) with
+  timestamps. Both for accountability and to surface per-publisher
+  patterns that should become learned rules.
+
+### Crossref-side completeness
+- **Bump XML template to Crossref schema 5.4.0** (currently 5.3.1).
+  One-file change in `templates/journal_article.xml.j2`.
+- **XSD validation** of the generated XML, not just well-formedness.
+  Run schema 5.4.0 inline before download / deposit.
+- **Direct deposit to Crossref** end-to-end. Sign in once with
+  Crossref credentials and `POST /submit` straight to their deposit
+  API instead of downloading XML and uploading by hand.
+- **Crossref REST diff.** Before depositing an update, fetch the
+  existing record from `api.crossref.org/works/{doi}` and show a diff
+  view so the editor sees exactly what they're about to overwrite.
+
+### Robustness & richer signals
+- **Local ROR / ORCID daily snapshot.** Mirror the public dumps
+  (ROR: ~50 MB/day, ORCID public summary: bulk export) so air-gapped
+  or rate-limited publishers can resolve identifiers without internet
+  egress. Falls back to live API if the snapshot misses.
+- **GROBID fallback for scanned / OCR-only PDFs.** Docling struggles
+  with poor scans; GROBID's TEI output covers a different failure mode
+  for legacy archives.
+- **Multi-language abstract support.** Crossref schema 5.4.0 lets you
+  deposit abstracts in multiple languages — surface and structure them
+  separately when present.
+- **XMP write-back into the PDF.** Embed the corrected metadata into
+  the PDF's XMP packet so downstream tools (institutional repositories,
+  preservation systems) read the same metadata that was deposited.
+- **Per-publisher rubric weights.** Let the publisher tune the five
+  Research Nexus dimension weights to match their own integrity
+  priorities (e.g. an OA-only publisher may weight Access higher).
+
+### Integration
+- **Webhook from typesetting pipeline.** Trigger `POST /submissions`
+  from a publisher's CI (Editorial Manager, OJS, Manuscript Manager)
+  the moment a final PDF is generated, so the metadata report is
+  ready before the editor opens it.
+- **Multi-tenant auth.** If hosted, per-publisher login + scoped data
+  (uploads, profiles, cost ledger) so multiple journals can share one
+  instance.
+
+If you'd like to pick one up or have other priorities, please open an
+issue at <https://github.com/aadivar/metadata_gapfixer/issues>.
+
+---
+
 ## Credits
 
 Built by the team behind **[nexus-score.vercel.app](https://nexus-score.vercel.app/)**.
