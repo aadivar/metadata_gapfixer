@@ -13,6 +13,7 @@ import {
   runNer,
   Section,
 } from "../api";
+import { ArrowLeftIcon, ArrowRightIcon } from "../icons";
 
 const CATEGORY_COLOR: Record<string, string> = {
   header: "#7c5cff",
@@ -151,12 +152,16 @@ export default function Inspect() {
       {mode === "layout" && hasLayout && (
         <div className="card">
           <div className="page-controls">
-            <button className="ghost" onClick={() => setPageNo((p) => Math.max(1, p - 1))} disabled={pageNo <= 1}>← Prev</button>
+            <button className="ghost" onClick={() => setPageNo((p) => Math.max(1, p - 1))} disabled={pageNo <= 1}>
+              <ArrowLeftIcon size={13} /> Prev
+            </button>
             <span className="muted">
               Page <input type="number" min={1} max={pages.length} value={pageNo}
                 onChange={(e) => setPageNo(Math.max(1, Math.min(pages.length, Number(e.target.value))))} /> of {pages.length}
             </span>
-            <button className="ghost" onClick={() => setPageNo((p) => Math.min(pages.length, p + 1))} disabled={pageNo >= pages.length}>Next →</button>
+            <button className="ghost" onClick={() => setPageNo((p) => Math.min(pages.length, p + 1))} disabled={pageNo >= pages.length}>
+              Next <ArrowRightIcon size={13} />
+            </button>
             <span className="muted">· {boxes.length} boxes on page</span>
             <span className="spacer" />
             <button className="ghost" onClick={() => setSelectedBoxIds(new Set())} disabled={selectedBoxIds.size === 0}>
@@ -212,7 +217,7 @@ export default function Inspect() {
                   ))}
                 </select>
                 <button className="primary" onClick={nerOnSelected} disabled={busy !== null || selectedBoxes.length === 0}>
-                  Run NER →
+                  Run NER <ArrowRightIcon size={13} />
                 </button>
               </div>
               {entityResults.length > 0 && (
@@ -254,7 +259,9 @@ export default function Inspect() {
                     <select value={preset} onChange={(e) => setPreset(e.target.value)}>
                       {Object.keys(presets).map((p) => (<option key={p} value={p}>{p}</option>))}
                     </select>
-                    <button className="primary" onClick={nerOnSection} disabled={busy !== null}>Run NER →</button>
+                    <button className="primary" onClick={nerOnSection} disabled={busy !== null}>
+                      Run NER <ArrowRightIcon size={13} />
+                    </button>
                   </div>
                   <pre className="section-text">{section.text}</pre>
                   {entityResults.length > 0 && (

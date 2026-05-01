@@ -23,6 +23,21 @@ import {
   Tier,
   xmlDownloadUrl,
 } from "../api";
+import {
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CircleIcon,
+  HelpCircleIcon,
+  PencilIcon,
+  ScaleIcon,
+  XIcon,
+} from "../icons";
+
+import type { ComponentType, SVGProps } from "react";
+type IconType = ComponentType<SVGProps<SVGSVGElement> & { size?: number }>;
 
 const TIER_DESCRIPTION: Record<Tier, string> = {
   T0: "Crossref schema 5.4.0 — required to deposit.",
@@ -394,10 +409,13 @@ function FieldCard({
     if (state === "needs_locate" && expanded) setLocateOpen(true);
   }, [state, expanded]);
 
+  const StateIcon = stateInfo.Icon;
   return (
     <div className={`field-card field-state-${state}`}>
       <div className="field-row" onClick={onToggleExpand}>
-        <span className="field-icon" style={{ color: stateInfo.color }}>{stateInfo.icon}</span>
+        <span className="field-icon" style={{ color: stateInfo.color }} title={stateInfo.label}>
+          <StateIcon size={14} />
+        </span>
         <span className="field-label">
           {field.label}
           {field.llm_leverage && <LeverageBadge leverage={field.llm_leverage} />}
@@ -411,7 +429,9 @@ function FieldCard({
             {field.provenance_confidence != null && ` · ${Math.round(field.provenance_confidence * 100)}%`}
           </span>
         )}
-        <span className="field-expand">{expanded ? "▾" : "▸"}</span>
+        <span className="field-expand">
+          {expanded ? <ChevronDownIcon size={14} /> : <ChevronRightIcon size={14} />}
+        </span>
       </div>
 
       {expanded && (
@@ -572,18 +592,26 @@ function LocatePanel({
   return (
     <div className="locate-panel">
       <div className="locate-controls">
-        <button className="ghost" onClick={() => setPageNo((p) => Math.max(1, p - 1))} disabled={pageNo <= 1}>← Prev</button>
+        <button className="ghost" onClick={() => setPageNo((p) => Math.max(1, p - 1))} disabled={pageNo <= 1}>
+          <ArrowLeftIcon size={13} /> Prev
+        </button>
         <span className="muted small">
           Page <input type="number" min={1} max={pages.length} value={pageNo}
             onChange={(e) => setPageNo(Math.max(1, Math.min(pages.length, Number(e.target.value))))}
             style={{ width: 50 }} /> of {pages.length}
         </span>
-        <button className="ghost" onClick={() => setPageNo((p) => Math.min(pages.length, p + 1))} disabled={pageNo >= pages.length}>Next →</button>
+        <button className="ghost" onClick={() => setPageNo((p) => Math.min(pages.length, p + 1))} disabled={pageNo >= pages.length}>
+          Next <ArrowRightIcon size={13} />
+        </button>
         <span className="muted small">· {boxes.length} boxes · {selected.size} selected</span>
         <span className="spacer" />
         <button className="ghost" onClick={() => setSelected(new Set())} disabled={selected.size === 0}>Clear</button>
         <button className="primary" onClick={save} disabled={submitting || selected.size === 0}>
-          {submitting ? "Saving…" : `✓ Use selection for ${field.label}`}
+          {submitting ? "Saving…" : (
+            <>
+              <CheckIcon size={13} /> Use selection for {field.label}
+            </>
+          )}
         </button>
       </div>
 
@@ -606,7 +634,7 @@ function LocatePanel({
                       top: `${(b.bbox.y / currentPage.h_px) * 100}%`,
                       width: `${(b.bbox.w / currentPage.w_px) * 100}%`,
                       height: `${(b.bbox.h / currentPage.h_px) * 100}%`,
-                      borderColor: sel ? "var(--accent)" : "rgba(124, 92, 255, 0.3)",
+                      borderColor: sel ? "var(--color-onyx-outline)" : "rgba(122, 121, 116, 0.35)",
                       background: sel ? "var(--accent-soft)" : "transparent",
                     }}
                     title={b.text.slice(0, 120)}
@@ -630,13 +658,13 @@ function LocatePanel({
   );
 }
 
-const STATE_INFO: Record<CardState, { icon: string; color: string; label: string }> = {
-  confirmed:    { icon: "✓", color: "var(--ok)",    label: "Confirmed" },
-  pending:      { icon: "?", color: "var(--warn)",  label: "Pending confirmation" },
-  needs_pick:   { icon: "⚖", color: "var(--info)",  label: "Pick candidate" },
-  needs_locate: { icon: "✗", color: "var(--error)", label: "Locate in document" },
-  missing:      { icon: "○", color: "var(--fg-tertiary)", label: "Missing" },
-  manual:       { icon: "✎", color: "var(--info)",  label: "Needs you" },
+const STATE_INFO: Record<CardState, { Icon: IconType; color: string; label: string }> = {
+  confirmed:    { Icon: CheckIcon,      color: "var(--ok)",            label: "Confirmed" },
+  pending:      { Icon: HelpCircleIcon, color: "var(--warn)",          label: "Pending confirmation" },
+  needs_pick:   { Icon: ScaleIcon,      color: "var(--info)",          label: "Pick candidate" },
+  needs_locate: { Icon: XIcon,          color: "var(--error)",         label: "Locate in document" },
+  missing:      { Icon: CircleIcon,     color: "var(--fg-tertiary)",   label: "Missing" },
+  manual:       { Icon: PencilIcon,     color: "var(--info)",          label: "Needs you" },
 };
 
 // ============================================================================
@@ -695,9 +723,13 @@ function AuthorsAffiliationsSuperCard({
 
   if (!ownedFields[0].field) return null;
 
-  const stateGlyph: Record<CardState, string> = {
-    confirmed: "✓", pending: "?", needs_pick: "⚖",
-    needs_locate: "✗", missing: "○", manual: "✎",
+  const stateIcon: Record<CardState, IconType> = {
+    confirmed: CheckIcon,
+    pending: HelpCircleIcon,
+    needs_pick: ScaleIcon,
+    needs_locate: XIcon,
+    missing: CircleIcon,
+    manual: PencilIcon,
   };
   const stateColor: Record<CardState, string> = {
     confirmed: "var(--ok)", pending: "var(--warn)", needs_pick: "var(--info)",
@@ -751,8 +783,10 @@ function AuthorsAffiliationsSuperCard({
   return (
     <div className={`card supercard ${collapsed ? "supercard-collapsed" : ""}`}>
       <div className="row supercard-header" onClick={toggleCollapsed} style={{ cursor: "pointer" }}>
-        <div className="cluster" style={{ alignItems: "baseline" }}>
-          <span className="muted">{collapsed ? "›" : "⌄"}</span>
+        <div className="cluster">
+          <span className="chev">
+            {collapsed ? <ChevronRightIcon size={16} /> : <ChevronDownIcon size={16} />}
+          </span>
           <h2 className="card-title" style={{ margin: 0 }}>Authors and affiliations</h2>
         </div>
         <span className="mono small" style={{ color: presentCount === ownedFields.length ? "var(--ok)" : "var(--fg-tertiary)" }}>
@@ -768,14 +802,19 @@ function AuthorsAffiliationsSuperCard({
           </p>
 
           <div className="supercard-checklist">
-            {ownedFields.map((o) => (
-              <div key={o.key} className="supercard-check-row" title={o.field?.why || ""}>
-                <span style={{ color: stateColor[o.state] }}>{stateGlyph[o.state]}</span>
-                <span className="check-tier mono">{o.tier}</span>
-                <span className="check-label">{o.label}</span>
-                <span className="check-preview muted">{o.field?.value_preview ?? "—"}</span>
-              </div>
-            ))}
+            {ownedFields.map((o) => {
+              const StateGlyph = stateIcon[o.state];
+              return (
+                <div key={o.key} className="supercard-check-row" title={o.field?.why || ""}>
+                  <span className="check-glyph" style={{ color: stateColor[o.state] }}>
+                    <StateGlyph size={12} />
+                  </span>
+                  <span className="check-tier mono">{o.tier}</span>
+                  <span className="check-label">{o.label}</span>
+                  <span className="check-preview muted">{o.field?.value_preview ?? "—"}</span>
+                </div>
+              );
+            })}
           </div>
 
           <div className="actions supercard-actions">
@@ -854,7 +893,7 @@ function AuthorsAffiliationsSuperCard({
             onClick={() => setListOpen((v) => !v)}
             aria-expanded={listOpen}
           >
-            <span>{listOpen ? "▾" : "▸"}</span>
+            <span className="chev">{listOpen ? <ChevronDownIcon size={14} /> : <ChevronRightIcon size={14} />}</span>
             <strong>{authors.length} extracted authors</strong>
             <span className="muted small">
               · {authors.filter((a) => a.orcid).length}/{authors.length} ORCID
@@ -1011,13 +1050,17 @@ function AuthorsAffiliationsLocate({
   return (
     <div className="locate-panel">
       <div className="locate-controls">
-        <button className="ghost" onClick={() => setPageNo((p) => Math.max(1, p - 1))} disabled={pageNo <= 1}>← Prev</button>
+        <button className="ghost" onClick={() => setPageNo((p) => Math.max(1, p - 1))} disabled={pageNo <= 1}>
+          <ArrowLeftIcon size={13} /> Prev
+        </button>
         <span className="muted small">
           Page <input type="number" min={1} max={pages.length} value={pageNo}
             onChange={(e) => setPageNo(Math.max(1, Math.min(pages.length, Number(e.target.value))))}
             style={{ width: 50 }} /> of {pages.length}
         </span>
-        <button className="ghost" onClick={() => setPageNo((p) => Math.min(pages.length, p + 1))} disabled={pageNo >= pages.length}>Next →</button>
+        <button className="ghost" onClick={() => setPageNo((p) => Math.min(pages.length, p + 1))} disabled={pageNo >= pages.length}>
+          Next <ArrowRightIcon size={13} />
+        </button>
         <span className="spacer" />
         <span className="muted small">{boxes.length} boxes · {authorIds.size} authors · {affilIds.size} affs</span>
       </div>
@@ -1028,13 +1071,13 @@ function AuthorsAffiliationsLocate({
           className={`mode-btn mode-authors ${mode === "authors" ? "active" : ""}`}
           onClick={() => setMode("authors")}
         >
-          ● Authors ({authorIds.size})
+          <span className="mode-dot" /> Authors ({authorIds.size})
         </button>
         <button
           className={`mode-btn mode-affils ${mode === "affiliations" ? "active" : ""}`}
           onClick={() => setMode("affiliations")}
         >
-          ● Affiliations ({affilIds.size})
+          <span className="mode-dot" /> Affiliations ({affilIds.size})
         </button>
         <span className="spacer" />
         <button className="ghost" onClick={() => { setAuthorIds(new Set()); setAffilIds(new Set()); }}>Clear all</button>
@@ -1055,11 +1098,11 @@ function AuthorsAffiliationsLocate({
               {boxes.map((b) => {
                 const isAuthor = authorIds.has(b.id);
                 const isAffil = affilIds.has(b.id);
-                let color = "rgba(124, 92, 255, 0.25)";
+                let color = "rgba(122, 121, 116, 0.35)";
                 let bg = "transparent";
                 let cls = "";
-                if (isAuthor) { color = "#f87171"; bg = "rgba(248, 113, 113, 0.18)"; cls = "selected"; }
-                else if (isAffil) { color = "#60a5fa"; bg = "rgba(96, 165, 250, 0.18)"; cls = "selected"; }
+                if (isAuthor) { color = "#f54e00"; bg = "rgba(245, 78, 0, 0.18)"; cls = "selected"; }
+                else if (isAffil) { color = "#34785c"; bg = "rgba(52, 120, 92, 0.18)"; cls = "selected"; }
                 return (
                   <div
                     key={b.id}

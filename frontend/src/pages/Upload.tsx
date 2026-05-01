@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { deleteSubmission, listSubmissions, uploadFile, Submission } from "../api";
+import { ArrowRightIcon, TrashIcon, UploadIcon } from "../icons";
 
 const TERMINAL = new Set(["parsed", "ready", "error"]);
 
@@ -80,11 +81,7 @@ export default function Upload() {
           }}
         >
           <div className="dropzone-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="17 8 12 3 7 8" />
-              <line x1="12" y1="3" x2="12" y2="15" />
-            </svg>
+            <UploadIcon size={20} />
           </div>
           <h3>{busy ? "Uploading…" : "Drop a PDF or DOCX here"}</h3>
           <p>or click to choose · max one file at a time</p>
@@ -126,7 +123,9 @@ export default function Upload() {
                 <span className={`status status-${s.status}`}>{s.status}</span>
                 <div className="cluster" style={{ gap: 6 }}>
                   {(s.status === "parsed" || s.status === "ready") ? (
-                    <Link to={`/review/${s.id}`} className="btn primary">Open →</Link>
+                    <Link to={`/review/${s.id}`} className="btn primary">
+                      Open <ArrowRightIcon size={14} />
+                    </Link>
                   ) : s.status === "error" ? (
                     <span className="muted small">—</span>
                   ) : (
@@ -138,12 +137,7 @@ export default function Upload() {
                     title="Delete submission and its files"
                     aria-label={`Delete submission ${s.id}`}
                   >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="3 6 5 6 21 6" />
-                      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                      <path d="M10 11v6M14 11v6" />
-                      <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
-                    </svg>
+                    <TrashIcon size={14} />
                   </button>
                 </div>
               </div>
