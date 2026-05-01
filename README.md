@@ -65,6 +65,18 @@ Five layers, each layered on the one below:
 the publisher's deliberate choice and is recorded in a per-submission USD
 ledger.
 
+**Side path · GLiNER2 NER.** A local zero-shot named-entity recogniser
+(`fastino/gliner2-large-v1` by default, `fastino/gliner2-base-v1` for
+smaller hosts) is mounted at `POST /submissions/{id}/ner` for ad-hoc entity
+extraction over a chosen text region. Per-zone label presets (e.g. funding
+zone → `award_id` + `funder_name`; CoI zone → `person` + `organization` +
+`relationship`; affiliation zone → `organization` + `country` + `gpe`) live
+in `services/ner.py`. GLiNER runs entirely on-device, no network calls, no
+LLM cost — it's the cheap layer for "find ORCIDs in this paragraph" or
+"pull award IDs from this funding statement" when neither regex nor a
+structured LLM call is the right tool. Weights download once into
+`./data/hf-cache/` (~1.4 GB) on first call.
+
 For a typical paper, full premium processing tops out around **$0.025**.
 Standard auto-fix (no LLM) is **$0**.
 
@@ -132,6 +144,8 @@ Standard auto-fix (no LLM) is **$0**.
 | `POST` | `/submissions/{id}/confirm` | Editor confirms a field |
 | `POST` | `/submissions/{id}/reject` | Editor rejects a field → `needs_locate` |
 | `POST` | `/submissions/{id}/locate` | Editor pointed to box(es); regex extraction for deterministic fields |
+| `POST` | `/submissions/{id}/ner` | On-device GLiNER2 zero-shot NER over a text region |
+| `GET`  | `/submissions/presets/labels` | NER label presets per content zone |
 | `POST` | `/submissions/{id}/xml` | Build Crossref XML |
 | `GET`  | `/submissions/{id}/xml` | Download XML |
 
