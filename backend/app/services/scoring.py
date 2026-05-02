@@ -72,8 +72,8 @@ RUBRIC: list[FieldDef] = [
     FieldDef(key="copyright_holder",      label="Copyright holder",                    tier="T3", dimension="mandatory", weight=3,  bucket="manual",                                      llm_leverage="deterministic", why="Publisher policy — your input."),
 
     # ─── Provenance (25%) — citations, similarity, update policies ──────────
-    FieldDef(key="references_any",        label="References (any form)",               tier="T1", dimension="provenance",  weight=6, bucket="high",   autofix_action="from_docling_refs",    llm_leverage="deterministic", why="Discoverability and citation graph."),
-    FieldDef(key="references_with_doi",   label="References with DOIs",                tier="T2", dimension="provenance",  weight=8, bucket="high",   autofix_action="resolve_references",   llm_leverage="ai", ai_cost_estimate=0.009, structurer_task="structure_references", why="Cited-by linking. LLM picks the right Crossref candidate per citation with match evidence."),
+    FieldDef(key="references_any",        label="References (any form)",               tier="T1", dimension="provenance",  weight=6, bucket="high",   autofix_action="from_docling_refs",    llm_leverage="deterministic", why="Discoverability and citation graph. Layout-aware detection + inline DOI regex during Locate."),
+    FieldDef(key="references_with_doi",   label="References with DOIs",                tier="T2", dimension="provenance",  weight=8, bucket="high",   autofix_action="resolve_references",   llm_leverage="api", ai_cost_estimate=0.009, structurer_task="structure_references", why="Lookup-first: inline DOI regex → Crossref bibliographic search → OpenAlex match. AI picks among ambiguous candidates only for the leftovers."),
     FieldDef(key="preprint_relation",     label="Preprint → version-of-record link",   tier="T3", dimension="provenance",  weight=8, bucket="medium", autofix_action="detect_preprint",      llm_leverage="deterministic", why="bioRxiv / medRxiv DOI pattern detection."),
     FieldDef(key="crossmark_policy",      label="Crossmark policy URL",                tier="T3", dimension="provenance",  weight=4, bucket="manual",                                       llm_leverage="deterministic", why="Update / correction / retraction policy."),
     FieldDef(key="conflict_of_interest",  label="Conflict-of-interest statement",      tier="T3", dimension="provenance",  weight=5, bucket="high",   autofix_action="from_factsheet",       llm_leverage="deterministic", why="Boilerplate-anchor extraction."),
@@ -421,6 +421,8 @@ _FIELD_KEY_TO_PATHS: dict[str, list[str]] = {
     "plain_language_summary": ["plain_language_summary"],
     "copyright_holder": ["copyright_holder"],
     "credit_roles": ["credit_contributions"],
+    "references_any": ["references"],
+    "references_with_doi": ["references"],
 }
 
 

@@ -508,6 +508,47 @@ def post_locate(sub_id: int, req: LocateRequest):
         elif _re.match(r"^[a-z0-9]{6,}$", joined.strip()):
             value = f"https://ror.org/{joined.strip()}"
             extraction_note = " (ROR ID coerced to URL form)"
+    elif fp_low in ("references", "references_any", "references_with_doi"):
+        # Split selected text into individual references; regex-extract DOIs
+        # alongside the raw text. This is the free pass that bumps both
+        # `references_any` (count > 0) and partly `references_with_doi`
+        # before any LLM call. Separators: a digit-bullet at line start,
+        # bracketed numbering "[12]", or a blank-line gap.
+        raw = "\n".join((b.get("text") or "") for b in selected if b.get("text"))
+        # Normalise whitespace per line, drop empties
+        lines = [_re.sub(r"\s+", " ", ln).strip() for ln in raw.split("\n")]
+        lines = [ln for ln in lines if ln]
+        # Re-join then split on common reference numbering patterns
+        merged = " ".join(lines)
+        chunks = _re.split(
+            r"(?:^|\s)(?:\(?\[?\d{1,3}[\.\)\]]\s+|\b\d{1,3}\.\s+(?=[A-Z]))",
+            merged,
+        )
+        chunks = [c.strip() for c in chunks if c and len(c.strip()) >= 30]
+        doi_re = _re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", _re.IGNORECASE)
+        year_re = _re.compile(r"\b(19|20)\d{2}\b")
+        refs: list[dict] = []
+        for c in chunks:
+            doi_m = doi_re.search(c)
+            year_m = year_re.search(c)
+            refs.append({
+                "raw": c[:600],
+                "doi": (doi_m.group(0).rstrip(".,;)]>") if doi_m else None),
+                "title": None,
+                "year": int(year_m.group(0)) if year_m else None,
+            })
+        if not refs:
+            raise HTTPException(400, "no reference-shaped chunks found in the selected text")
+        with_doi = sum(1 for r in refs if r["doi"])
+        value = refs
+        extraction_note = (
+            f" (regex-split {len(refs)} refs; {with_doi} DOIs found inline)"
+        )
+        # Force the write target to `references` regardless of which
+        # rubric key the editor clicked Locate on.
+        req = LocateRequest(
+            page=req.page, box_ids=req.box_ids, field_path="references",
+        )
 
     meta = _load_metadata(sub_id)
     fs = _load_factsheet(sub_id)

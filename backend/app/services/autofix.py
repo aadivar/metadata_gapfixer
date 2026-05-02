@@ -452,39 +452,77 @@ def _autofix_funders(meta: dict, fs: Factsheet) -> AutofixReport:
 
 
 def _autofix_references(meta: dict, fs: Factsheet, docling_doc: dict) -> AutofixReport:
+    """Lookup-first DOI resolution for each reference:
+       1. inline regex (already done at extraction time — counted here)
+       2. Crossref Works bibliographic search
+       3. OpenAlex Works search as a fallback when Crossref misses
+       AI is reserved for the leftovers (publisher opt-in via
+       /structure/structure_references)."""
     refs = _ensure_references(meta, fs, docling_doc)
     cr = CrossrefClient()
-    resolved = needs_pick = 0
+    oa = OpenAlexClient()
+    resolved_inline = resolved_crossref = resolved_openalex = 0
+    needs_pick = no_candidates = 0
 
     for i, r in enumerate(refs[:100]):
         path = f"references[{i}].doi"
         if r.get("doi"):
             _set_prov(meta, path, source="regex", confidence=1.0,
                       reasoning="DOI extracted directly from the citation text.")
+            resolved_inline += 1
             continue
+        # Pass 2 — Crossref Works
         cands = cr.search_work(query=r["raw"][:400])
-        if not cands:
-            _set_prov(meta, path, source="no_candidates", confidence=0.0,
-                      reasoning="Crossref Works search returned no matches.")
-        elif len(cands) == 1:
+        if len(cands) == 1:
             r["doi"] = cands[0].get("doi")
             r["title"] = cands[0].get("title")
             _set_prov(meta, path, source="crossref_api", confidence=0.95,
                       reasoning="Sole candidate returned by Crossref Works search.")
-            resolved += 1
-        else:
+            resolved_crossref += 1
+            continue
+        if len(cands) > 1:
             meta.setdefault("provenance", {})[path] = {
                 "source": "needs_pick", "confidence": 0.0,
-                "reasoning": f"{len(cands)} candidates returned; pick one or use AI to adjudicate.",
+                "reasoning": f"{len(cands)} candidates returned by Crossref; pick one or use AI to adjudicate.",
                 "candidates": _candidates_to_provenance(cands, ["doi"]),
                 "query": {"citation": r["raw"][:400]},
                 "task": "reference_pick", "source_api": "Crossref Works",
             }
             needs_pick += 1
+            continue
+        # Pass 3 — OpenAlex fallback (Crossref returned nothing)
+        oa_cands = oa.search_work(title=r["raw"][:400])
+        if len(oa_cands) == 1 and oa_cands[0].get("doi"):
+            r["doi"] = oa_cands[0]["doi"]
+            r["title"] = oa_cands[0].get("title")
+            _set_prov(meta, path, source="openalex_api", confidence=0.9,
+                      reasoning="Sole candidate returned by OpenAlex Works search after Crossref miss.")
+            resolved_openalex += 1
+            continue
+        if len(oa_cands) > 1:
+            meta.setdefault("provenance", {})[path] = {
+                "source": "needs_pick", "confidence": 0.0,
+                "reasoning": f"{len(oa_cands)} candidates returned by OpenAlex; pick one or use AI to adjudicate.",
+                "candidates": _candidates_to_provenance(oa_cands, ["doi", "openalex_id"]),
+                "query": {"citation": r["raw"][:400]},
+                "task": "reference_pick", "source_api": "OpenAlex Works",
+            }
+            needs_pick += 1
+            continue
+        _set_prov(meta, path, source="no_candidates", confidence=0.0,
+                  reasoning="Neither Crossref nor OpenAlex returned a match for this citation.")
+        no_candidates += 1
 
-    return AutofixReport({"action": "resolve_references", "ok": True,
-                          "resolved": resolved, "needs_pick": needs_pick,
-                          "out_of": len(refs)})
+    return AutofixReport({
+        "action": "resolve_references", "ok": True,
+        "resolved_inline": resolved_inline,
+        "resolved_crossref": resolved_crossref,
+        "resolved_openalex": resolved_openalex,
+        "resolved": resolved_inline + resolved_crossref + resolved_openalex,
+        "needs_pick": needs_pick,
+        "no_candidates": no_candidates,
+        "out_of": len(refs),
+    })
 
 
 # ============================================================================
