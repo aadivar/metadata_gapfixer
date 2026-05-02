@@ -755,6 +755,17 @@ td code { color: var(--color-onyx-outline); background: var(--accent-soft); padd
 .overlay-layer .box.selected {
   border-width: 2.5px;
 }
+.overlay-layer .lasso-rect {
+  position: absolute;
+  border: 1.5px dashed var(--color-onyx-outline);
+  background: color-mix(in srgb, var(--color-onyx-outline) 12%, transparent);
+  pointer-events: none;
+  border-radius: 2px;
+}
+.overlay-layer .lasso-rect.subtract {
+  border-color: var(--error);
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+}
 
 .layout-side {
   background: var(--bg-surface);

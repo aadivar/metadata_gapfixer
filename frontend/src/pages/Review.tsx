@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   autofix,
@@ -858,6 +858,10 @@ function LocatePanel({
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [err, setErr] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Drag-lasso state — Shift+drag subtracts, plain drag adds.
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const dragStartRef = useRef<{ x: number; y: number; clickedId: number | null; shift: boolean } | null>(null);
+  const [lasso, setLasso] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -892,6 +896,91 @@ function LocatePanel({
       else next.add(id);
       return next;
     });
+  }
+
+  // Convert a mouse event to image-px coords (using the canvas's
+  // bounding rect — works regardless of the displayed render size).
+  function pointInImagePx(e: React.MouseEvent): { x: number; y: number } | null {
+    const wrap = canvasRef.current;
+    const cur = pages.find((p) => p.page === pageNo);
+    if (!wrap || !cur) return null;
+    const rect = wrap.getBoundingClientRect();
+    const xPct = (e.clientX - rect.left) / rect.width;
+    const yPct = (e.clientY - rect.top) / rect.height;
+    return { x: xPct * cur.w_px, y: yPct * cur.h_px };
+  }
+  function boxAt(p: { x: number; y: number }): number | null {
+    for (const b of boxes) {
+      if (p.x >= b.bbox.x && p.x <= b.bbox.x + b.bbox.w &&
+          p.y >= b.bbox.y && p.y <= b.bbox.y + b.bbox.h) {
+        return b.id;
+      }
+    }
+    return null;
+  }
+  function boxesInRect(r: { x0: number; y0: number; x1: number; y1: number }): number[] {
+    const xMin = Math.min(r.x0, r.x1), xMax = Math.max(r.x0, r.x1);
+    const yMin = Math.min(r.y0, r.y1), yMax = Math.max(r.y0, r.y1);
+    const out: number[] = [];
+    for (const b of boxes) {
+      const bx2 = b.bbox.x + b.bbox.w;
+      const by2 = b.bbox.y + b.bbox.h;
+      const noOverlap = bx2 < xMin || b.bbox.x > xMax || by2 < yMin || b.bbox.y > yMax;
+      if (!noOverlap) out.push(b.id);
+    }
+    return out;
+  }
+  function onCanvasMouseDown(e: React.MouseEvent) {
+    if (e.button !== 0) return;
+    const p = pointInImagePx(e);
+    if (!p) return;
+    dragStartRef.current = {
+      x: p.x, y: p.y,
+      clickedId: boxAt(p),
+      shift: e.shiftKey,
+    };
+    setLasso(null);
+    e.preventDefault();
+  }
+  function onCanvasMouseMove(e: React.MouseEvent) {
+    if (!dragStartRef.current) return;
+    const p = pointInImagePx(e);
+    if (!p) return;
+    const dx = p.x - dragStartRef.current.x;
+    const dy = p.y - dragStartRef.current.y;
+    // 6 image-px threshold to distinguish a click from a drag
+    if (lasso == null && Math.hypot(dx, dy) < 6) return;
+    setLasso({
+      x0: dragStartRef.current.x, y0: dragStartRef.current.y,
+      x1: p.x, y1: p.y,
+    });
+  }
+  function onCanvasMouseUp() {
+    const start = dragStartRef.current;
+    if (!start) return;
+    if (lasso) {
+      const ids = boxesInRect(lasso);
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (start.shift) {
+          for (const id of ids) next.delete(id);
+        } else {
+          for (const id of ids) next.add(id);
+        }
+        return next;
+      });
+    } else if (start.clickedId != null) {
+      toggleBox(start.clickedId);
+    }
+    dragStartRef.current = null;
+    setLasso(null);
+  }
+  function onCanvasMouseLeave() {
+    // Cancel any in-flight drag if cursor leaves the canvas
+    if (dragStartRef.current) {
+      dragStartRef.current = null;
+      setLasso(null);
+    }
   }
 
   const selectedBoxes = boxes.filter((b) => selected.has(b.id));
@@ -948,9 +1037,18 @@ function LocatePanel({
         </button>
       </div>
 
+      <p className="muted small" style={{ margin: "0 0 8px" }}>
+        Drag to select multiple at once. Shift-drag to deselect a region.
+        Click any box to toggle it individually.
+      </p>
       <div
+        ref={canvasRef}
         className="page-canvas-wrap locate-canvas"
-        style={currentPage ? { aspectRatio: `${currentPage.w_px} / ${currentPage.h_px}` } : undefined}
+        style={currentPage ? { aspectRatio: `${currentPage.w_px} / ${currentPage.h_px}`, cursor: "crosshair", userSelect: "none" } : undefined}
+        onMouseDown={onCanvasMouseDown}
+        onMouseMove={onCanvasMouseMove}
+        onMouseUp={onCanvasMouseUp}
+        onMouseLeave={onCanvasMouseLeave}
       >
         {currentPage && (
           <>
@@ -969,12 +1067,30 @@ function LocatePanel({
                       height: `${(b.bbox.h / currentPage.h_px) * 100}%`,
                       borderColor: sel ? "var(--color-onyx-outline)" : "rgba(122, 121, 116, 0.35)",
                       background: sel ? "var(--accent-soft)" : "transparent",
+                      pointerEvents: "none",
                     }}
                     title={b.text.slice(0, 120)}
-                    onClick={() => toggleBox(b.id)}
                   />
                 );
               })}
+              {lasso && currentPage && (() => {
+                const xMin = Math.min(lasso.x0, lasso.x1);
+                const yMin = Math.min(lasso.y0, lasso.y1);
+                const w = Math.abs(lasso.x1 - lasso.x0);
+                const h = Math.abs(lasso.y1 - lasso.y0);
+                const subtract = !!dragStartRef.current?.shift;
+                return (
+                  <div
+                    className={`lasso-rect ${subtract ? "subtract" : ""}`}
+                    style={{
+                      left: `${(xMin / currentPage.w_px) * 100}%`,
+                      top: `${(yMin / currentPage.h_px) * 100}%`,
+                      width: `${(w / currentPage.w_px) * 100}%`,
+                      height: `${(h / currentPage.h_px) * 100}%`,
+                    }}
+                  />
+                );
+              })()}
             </div>
           </>
         )}
