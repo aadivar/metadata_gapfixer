@@ -75,6 +75,47 @@ appear under "Needs attention" with the next-best-action button (Run
 lookup · free / Identify on document / Confirm / Reject and
 re-identify) — never more than one primary CTA per state.
 
+### Per-author entity views (ORCID, CRediT, ROR)
+
+![People + Organizations expanded — entity-level views](screenshot-3.png)
+
+The interpretation banner adapts to the score:
+*"Depositable, but the record is thin. It will be hard for indexers to
+use."* — Mandatory is satisfied (so the deposit XML can be generated),
+but the weighted Research Nexus score is low because Funding and Access
+are 0% on this paper. The hero score and banner are deliberately
+separate from the Mandatory gate: the deposit can go through, but the
+record won't enable discovery, citation graphs, or compliance
+reporting until the other dimensions are filled.
+
+Pictured: **People** and **Organizations** both expanded.
+
+In **People**, the dimension-owned pillar reads `8/8 authors with
+ORCID` — that's the actual entity count, not a rubric flag. Inside,
+each field card expands to show the underlying values:
+
+  * `ORCID for corresponding author` and `ORCID for every author` show
+    each author with their resolved ORCID chip linking out to the
+    public profile. `lookup` badges advertise that these were free API
+    resolutions — no LLM cost.
+  * `CRediT contributor roles` is the AI structurer's output: per
+    author, the 14-role CRediT taxonomy assignment, each role
+    accompanied by an evidence quote pulled from the PDF and a
+    confidence percentage. Editors can scan the evidence to verify the
+    LLM's mapping rather than trust it blindly.
+
+In **Organizations**, every author's affiliation is linked to a ROR
+chip cross-referenced against the Research Organization Registry. The
+list deduplicates so three authors at the same institution count as
+one resolved affiliation, not three (a common scoring trap fixed
+earlier in the project's history). Each row shows the affiliation
+string, its ROR ID, and the link out — the same shape the deposit
+XML's `<affiliation><institution-id type="ror">` element wants.
+
+This is the "show the data, not just the verdict" rule: every dimension
+score is decomposable down to the actual extracted values, with their
+provenance, so the editor can audit before depositing.
+
 ---
 
 ## Categorisation: one Mandatory gate + five Research Nexus dimensions
