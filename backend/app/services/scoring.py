@@ -383,25 +383,25 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
         with_doi = sum(1 for r in refs if r.get("doi"))
         return (with_doi == len(refs), f"{with_doi}/{len(refs)} have DOI")
     if field == "funder_doi":
-        if _rejected("funders"):
-            return (False, REJECTED_PREVIEW)
         funders = _v("funders") or []
+        if not funders and _rejected("funders"):
+            return (False, REJECTED_PREVIEW)
         if not funders:
             return (False, "no funders")
         with_doi = sum(1 for fu in funders if fu.get("doi"))
         return (with_doi == len(funders), f"{with_doi}/{len(funders)} have Funder Registry DOI")
     if field == "award_numbers":
-        if _rejected("funders"):
-            return (False, REJECTED_PREVIEW)
         funders = _v("funders") or []
         grants = f.grant_ids
+        if not funders and not grants and _rejected("funders"):
+            return (False, REJECTED_PREVIEW)
         if funders:
             ok = all(fu.get("award_numbers") for fu in funders)
             n = sum(len(fu.get("award_numbers") or []) for fu in funders)
             preview_ids = [aw for fu in funders for aw in (fu.get("award_numbers") or [])]
             preview = ", ".join(preview_ids[:3]) + (f" (+{len(preview_ids)-3} more)" if len(preview_ids) > 3 else "")
             return (ok, f"{n} award numbers · {preview}" if preview else f"{n} award numbers across funders")
-        if grants:
+        if grants and not _rejected("funders"):
             preview_ids = [g.get("id") for g in grants if g.get("id")][:3]
             preview = ", ".join(preview_ids) + (f" (+{len(grants)-3} more)" if len(grants) > 3 else "")
             return (True, f"{len(grants)} grant IDs detected · {preview}")

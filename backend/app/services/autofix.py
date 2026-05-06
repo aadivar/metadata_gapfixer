@@ -437,6 +437,18 @@ def _autofix_funders(meta: dict, fs: Factsheet) -> AutofixReport:
     oa = OpenAlexClient()
     resolved = needs_pick = 0
 
+    # Clear any prior rejection on the top-level funders entry — the
+    # editor explicitly re-ran the lookup, so the stale needs_locate
+    # marker shouldn't keep the field in 'rejected' state.
+    if funders:
+        prov_top = (meta.setdefault("provenance", {}).get("funders") or {})
+        if prov_top.get("source") == "needs_locate":
+            meta["provenance"]["funders"] = {
+                "source": "factsheet+openalex_api", "confidence": 0.9,
+                "confirmed": False,
+                "reasoning": "Funders re-derived after rejection.",
+            }
+
     for i, fu in enumerate(funders):
         if fu.get("doi") or not fu.get("name"):
             continue
