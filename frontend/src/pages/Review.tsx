@@ -1073,10 +1073,18 @@ function FieldCard({
           )}
 
           {state === "manual" && (
-            <p className="muted small">
-              Publisher-policy field. Inline input form lands in the next slice. You can also
-              click <strong>Identify on document</strong> if the value happens to be in the PDF.
-            </p>
+            <>
+              <p className="muted small">
+                Publisher-policy field. Inline input form lands in the next slice — for now,
+                point at the value on the PDF if it appears there.
+              </p>
+              <div className="actions">
+                <button className="primary" onClick={() => setLocateOpen((v) => !v)} disabled={busy}
+                        title="Pick the box(es) on the page that contain this field's value.">
+                  Identify on document
+                </button>
+              </div>
+            </>
           )}
 
           {locateOpen && (
