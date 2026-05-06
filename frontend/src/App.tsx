@@ -37,7 +37,7 @@ export default function App() {
           <div className="brand-mark">M</div>
           <div className="brand-text">
             Metadata Generator
-            <small>scholarly · Crossref</small>
+            <small>diagnose gaps · fix them · deposit cleanly</small>
           </div>
         </Link>
 
