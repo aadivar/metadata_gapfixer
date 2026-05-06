@@ -203,6 +203,15 @@ def structure_authors(meta: dict, fs: Factsheet, docling_doc: dict, *,
 
     # Provenance entries
     prov = meta.setdefault("provenance", {})
+    # Top-level authors entry: clears any prior 'needs_locate' (reject) state
+    # so the field card can flip back out of needs_locate after re-identify.
+    prov["authors"] = {
+        "source": "user_locate+llm_structured" if override_blocks else "llm_structured",
+        "confidence": 0.95,
+        "confirmed": False,
+        "reasoning": "Authors re-identified by LLM structurer.",
+        "task": "structure_authors",
+    }
     for i, a in enumerate(result.authors):
         prov[f"authors[{i}]"] = {
             "source": "llm_structured",

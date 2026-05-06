@@ -10,11 +10,13 @@ import {
   enrichAll,
   FieldScore,
   getCost,
+  getFactsheet,
   getMetadata,
   getPages,
   getPageBoxes,
   getScore,
   LayoutBox,
+  LocateSelection,
   locateField,
   pageImageUrl,
   PageInfo,
@@ -140,6 +142,22 @@ export default function Review() {
 
   useEffect(() => { refresh(); }, [subId]);
 
+  // Keep the metadata JSON view in sync with server state whenever the
+  // scorecard updates (i.e. after reject / confirm / locate / autofix /
+  // structurer). Without this the editor shows stale fields the user just
+  // rejected. Any unsaved local edits get blown away — the editor is meant
+  // for inspecting the canonical metadata, and clicking "Save" is the
+  // explicit way to push manual edits.
+  useEffect(() => {
+    if (!showMeta || !card) return;
+    (async () => {
+      try {
+        const m = await getMetadata(subId);
+        setMetaText(JSON.stringify(m, null, 2));
+      } catch (e) { setErr(String(e)); }
+    })();
+  }, [card, showMeta, subId]);
+
   function showToast(msg: string) {
     setToast(msg);
     setTimeout(() => setToast(null), 4000);
@@ -244,7 +262,7 @@ export default function Review() {
     finally { setBusy(null); }
   }
 
-  async function locate(field: FieldScore, page: number, boxIds: number[], joinedText?: string) {
+  async function locate(field: FieldScore, page: number, boxIds: number[], joinedText?: string, selections?: LocateSelection[]) {
     const text = (joinedText ?? "").trim();
     // For AI-leverage fields with a structurer task, the located text is fed
     // straight to the LLM (so e.g. CRediT prose without an explicit heading
@@ -285,9 +303,12 @@ export default function Review() {
     const path = (field.metadata_paths || [])[0] || field.key;
     setBusy(`Saving location for ${field.label}…`);
     try {
-      const res = await locateField(subId, path, page, boxIds);
+      const res = await locateField(subId, path, page, boxIds, selections);
       setCard(res.score);
-      showToast(`${field.label} set from page ${page} selection`);
+      const pageLabel = selections && selections.length > 1
+        ? `pp.${selections.map((s) => s.page).join(", ")}`
+        : `page ${page}`;
+      showToast(`${field.label} set from ${pageLabel} selection`);
     } catch (e) { setErr(String(e)); throw e; }
     finally { setBusy(null); }
   }
@@ -451,7 +472,7 @@ export default function Review() {
             onReject={() => reject(f)}
             onAutofix={f.autofix_action ? () => fixOne(f.autofix_action!) : undefined}
             onRunStructurer={f.structurer_task ? () => runStructure(f) : undefined}
-            onLocate={(page, boxIds, joinedText) => locate(f, page, boxIds, joinedText)}
+            onLocate={(page, boxIds, joinedText, selections) => locate(f, page, boxIds, joinedText, selections)}
             busy={busy !== null}
           />
         );
@@ -605,14 +626,43 @@ type AuthorsListMode = "full_names" | "orcid_corresponding" | "orcid_all" | "aff
 function AuthorsListView({ subId, mode }: { subId: number; mode: AuthorsListMode }) {
   const [authors, setAuthors] = useState<any[] | null>(null);
   const [provenance, setProvenance] = useState<Record<string, any>>({});
+  const [fromFactsheet, setFromFactsheet] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
         const m = await getMetadata(subId);
-        setAuthors(m.authors || []);
+        const metaAuthors = (m.authors || []) as any[];
         setProvenance(m.provenance || {});
+        // The score endpoint falls back to the factsheet's parsed authors when
+        // meta has none, so the card preview reads "20 authors" before
+        // auto-fix has copied them into meta. Mirror that here so the
+        // expanded view shows the names instead of "No authors yet."
+        if (metaAuthors.length === 0) {
+          try {
+            const fs = await getFactsheet(subId);
+            const fsAuthors = (fs.authors || []) as any[];
+            setAuthors(fsAuthors.map((a: any) => ({
+              full_name: a.name,
+              given_name: a.given,
+              surname: a.surname,
+              orcid: a.orcid,
+              email: a.email,
+              is_corresponding: a.is_corresponding,
+              affiliations: a.markers ? a.markers
+                .map((mk: string) => (fs.affiliations || {})[mk])
+                .filter(Boolean) : [],
+              ror_ids: [],
+            })));
+            setFromFactsheet(true);
+          } catch {
+            setAuthors([]);
+          }
+        } else {
+          setAuthors(metaAuthors);
+          setFromFactsheet(false);
+        }
       } catch (e) { setErr(String(e)); }
     })();
   }, [subId]);
@@ -631,6 +681,12 @@ function AuthorsListView({ subId, mode }: { subId: number; mode: AuthorsListMode
   }
 
   return (
+    <>
+      {fromFactsheet && (
+        <p className="muted small" style={{ marginTop: 8 }}>
+          From factsheet (regex-parsed). Run "Run automated extraction" to copy into metadata.
+        </p>
+      )}
     <ol className="author-rows" style={{ marginTop: 8 }}>
       {visible.map((a: any, i: number) => {
         const idx = authors.indexOf(a);
@@ -690,6 +746,7 @@ function AuthorsListView({ subId, mode }: { subId: number; mode: AuthorsListMode
         );
       })}
     </ol>
+    </>
   );
 }
 
@@ -702,6 +759,89 @@ const AUTHOR_VIEW_FIELDS: Record<string, AuthorsListMode> = {
   ror_for_all_affiliations: "ror",
 };
 
+const REFERENCES_VIEW_FIELDS = new Set(["references_any", "references_with_doi"]);
+
+const REFS_PAGE_SIZE = 10;
+function ReferencesView({ subId, mode }: { subId: number; mode: "all" | "with_doi" }) {
+  const [refs, setRefs] = useState<any[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const m = await getMetadata(subId);
+        setRefs(m.references || []);
+      } catch (e) { setErr(String(e)); }
+    })();
+  }, [subId]);
+
+  if (err) return <p className="error" style={{ marginTop: 8 }}>{err}</p>;
+  if (refs === null) return <p className="muted small loading">Loading references</p>;
+  if (refs.length === 0) {
+    return <p className="muted small" style={{ marginTop: 8 }}>No references on metadata yet.</p>;
+  }
+
+  const visible = mode === "with_doi" ? refs.filter((r: any) => r && r.doi) : refs;
+  if (visible.length === 0) {
+    return <p className="muted small" style={{ marginTop: 8 }}>No references with a DOI yet.</p>;
+  }
+  const totalPages = Math.max(1, Math.ceil(visible.length / REFS_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages - 1);
+  const start = safePage * REFS_PAGE_SIZE;
+  const slice = visible.slice(start, start + REFS_PAGE_SIZE);
+  const withDoi = refs.filter((r: any) => r && r.doi).length;
+
+  return (
+    <div className="references-view" style={{ marginTop: 10 }}>
+      <h5 style={{ marginBottom: 6 }}>
+        {mode === "with_doi"
+          ? `${visible.length} references with DOI`
+          : `${refs.length} references · ${withDoi} with DOI`}
+      </h5>
+      <ol className="references-list" start={start + 1} style={{ paddingLeft: 24 }}>
+        {slice.map((r: any, i: number) => (
+          <li key={start + i} className="reference-row" style={{ marginBottom: 6 }}>
+            <div className="reference-raw small">
+              {(r.raw || "").trim() || <em className="muted">(empty)</em>}
+            </div>
+            <div className="reference-meta muted small" style={{ marginTop: 2 }}>
+              {r.year && <span>{r.year}</span>}
+              {r.doi ? (
+                <>
+                  {r.year && <span> · </span>}
+                  <a href={`https://doi.org/${r.doi}`} target="_blank" rel="noreferrer" className="mono">
+                    {r.doi}
+                  </a>
+                </>
+              ) : (
+                <>
+                  {r.year && <span> · </span>}
+                  <span className="chip chip-missing">no DOI</span>
+                </>
+              )}
+              {r.title && <span> · {r.title}</span>}
+            </div>
+          </li>
+        ))}
+      </ol>
+      {totalPages > 1 && (
+        <div className="references-pager row" style={{ marginTop: 8, gap: 8, alignItems: "center" }}>
+          <button className="ghost" onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={safePage === 0}>
+            <ArrowLeftIcon size={13} /> Prev
+          </button>
+          <span className="muted small">
+            Page {safePage + 1} of {totalPages} · showing {start + 1}–{Math.min(start + REFS_PAGE_SIZE, visible.length)} of {visible.length}
+          </span>
+          <button className="ghost" onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))} disabled={safePage >= totalPages - 1}>
+            Next <ArrowRightIcon size={13} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FieldCard({
   subId, field, expanded, onToggleExpand, onConfirm, onReject, onAutofix, onRunStructurer, onLocate, busy,
 }: {
@@ -713,7 +853,7 @@ function FieldCard({
   onReject: () => void;
   onAutofix?: () => void;
   onRunStructurer?: () => void;
-  onLocate: (page: number, boxIds: number[], joinedText: string) => Promise<void>;
+  onLocate: (page: number, boxIds: number[], joinedText: string, selections: LocateSelection[]) => Promise<void>;
   busy: boolean;
 }) {
   const state = deriveState(field);
@@ -762,6 +902,10 @@ function FieldCard({
 
           {AUTHOR_VIEW_FIELDS[field.key] && (state === "confirmed" || state === "pending" || state === "missing") && (
             <AuthorsListView subId={subId} mode={AUTHOR_VIEW_FIELDS[field.key]} />
+          )}
+
+          {REFERENCES_VIEW_FIELDS.has(field.key) && (state === "confirmed" || state === "pending") && (
+            <ReferencesView subId={subId} mode={field.key === "references_with_doi" ? "with_doi" : "all"} />
           )}
 
           {state === "confirmed" && (
@@ -827,8 +971,8 @@ function FieldCard({
               subId={subId}
               field={field}
               defaultPage={expectedPageFor(field.key)}
-              onSubmit={async (page, boxIds, joinedText) => {
-                await onLocate(page, boxIds, joinedText);
+              onSubmit={async (page, boxIds, joinedText, selections) => {
+                await onLocate(page, boxIds, joinedText, selections);
                 setLocateOpen(false);
               }}
             />
@@ -849,19 +993,25 @@ function LocatePanel({
   subId: number;
   field: FieldScore;
   defaultPage: number;
-  onSubmit: (page: number, boxIds: number[], joinedText: string) => Promise<void>;
+  onSubmit: (page: number, boxIds: number[], joinedText: string, selections: LocateSelection[]) => Promise<void>;
 }) {
   const [pages, setPages] = useState<PageInfo[]>([]);
   const [pageNo, setPageNo] = useState(defaultPage);
-  const [boxes, setBoxes] = useState<LayoutBox[]>([]);
-  const [pageDims, setPageDims] = useState<{ w: number; h: number }>({ w: 1, h: 1 });
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  // Per-page cache so selections survive page navigation and joined text
+  // can be assembled from boxes on pages the editor isn't currently viewing
+  // (e.g. references that span pp.45-49).
+  const [boxesByPage, setBoxesByPage] = useState<Map<number, LayoutBox[]>>(new Map());
+  const [selectedByPage, setSelectedByPage] = useState<Map<number, Set<number>>>(new Map());
   const [err, setErr] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  // Drag-lasso state — Shift+drag subtracts, plain drag adds.
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const dragStartRef = useRef<{ x: number; y: number; clickedId: number | null; shift: boolean } | null>(null);
   const [lasso, setLasso] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+
+  const boxes = boxesByPage.get(pageNo) ?? [];
+  const selected = selectedByPage.get(pageNo) ?? new Set<number>();
+  const totalSelected = Array.from(selectedByPage.values()).reduce((n, s) => n + s.size, 0);
+  const pagesWithSelection = Array.from(selectedByPage.keys()).filter((p) => (selectedByPage.get(p) ?? new Set()).size > 0).sort((a, b) => a - b);
 
   useEffect(() => {
     (async () => {
@@ -879,18 +1029,31 @@ function LocatePanel({
 
   useEffect(() => {
     if (pages.length === 0) return;
+    if (boxesByPage.has(pageNo)) return;
     (async () => {
       try {
         const r = await getPageBoxes(subId, pageNo);
-        setBoxes(r.boxes);
-        setPageDims({ w: r.w_px, h: r.h_px });
-        setSelected(new Set());  // clear selection when page changes
+        setBoxesByPage((prev) => {
+          const m = new Map(prev);
+          m.set(pageNo, r.boxes);
+          return m;
+        });
       } catch (e) { setErr(String(e)); }
     })();
-  }, [subId, pageNo, pages.length]);
+  }, [subId, pageNo, pages.length, boxesByPage]);
 
+  function setSelectedForPage(pg: number, updater: (prev: Set<number>) => Set<number>) {
+    setSelectedByPage((prev) => {
+      const cur = new Set(prev.get(pg) ?? []);
+      const next = updater(cur);
+      const m = new Map(prev);
+      if (next.size === 0) m.delete(pg);
+      else m.set(pg, next);
+      return m;
+    });
+  }
   function toggleBox(id: number) {
-    setSelected((prev) => {
+    setSelectedForPage(pageNo, (prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -960,7 +1123,7 @@ function LocatePanel({
     if (!start) return;
     if (lasso) {
       const ids = boxesInRect(lasso);
-      setSelected((prev) => {
+      setSelectedForPage(pageNo, (prev) => {
         const next = new Set(prev);
         if (start.shift) {
           for (const id of ids) next.delete(id);
@@ -983,23 +1146,43 @@ function LocatePanel({
     }
   }
 
-  const selectedBoxes = boxes.filter((b) => selected.has(b.id));
-  const previewText = selectedBoxes.map((b) => b.text).filter(Boolean).join("\n\n");
+  // Aggregate selections across every page the editor has touched, in page
+  // order. previewText, the box-id list, and the multi-page `selections`
+  // payload all derive from this so the Locate flow works for content that
+  // spans multiple pages (e.g. a 3-page reference list).
+  const allSelectedBoxes: LayoutBox[] = [];
+  for (const pg of pagesWithSelection) {
+    const pageBoxes = boxesByPage.get(pg) ?? [];
+    const sel = selectedByPage.get(pg) ?? new Set<number>();
+    for (const b of pageBoxes) if (sel.has(b.id)) allSelectedBoxes.push(b);
+  }
+  const previewText = allSelectedBoxes.map((b) => b.text).filter(Boolean).join("\n\n");
+  const selectionsPayload: LocateSelection[] = pagesWithSelection.map((pg) => ({
+    page: pg,
+    box_ids: Array.from(selectedByPage.get(pg) ?? []),
+  }));
 
   async function save() {
-    if (selected.size === 0) {
+    if (totalSelected === 0) {
       setErr("Click at least one box on the page.");
       return;
     }
     setErr(null);
     setSubmitting(true);
     try {
-      await onSubmit(pageNo, [...selected], previewText);
+      // Pass the first selected page's IDs as the legacy single-page payload
+      // for backwards compatibility, plus the full multi-page selections.
+      const firstPage = pagesWithSelection[0] ?? pageNo;
+      const firstPageIds = Array.from(selectedByPage.get(firstPage) ?? []);
+      await onSubmit(firstPage, firstPageIds, previewText, selectionsPayload);
     } catch (e) {
       setErr(String(e));
     } finally {
       setSubmitting(false);
     }
+  }
+  function clearAll() {
+    setSelectedByPage(new Map());
   }
 
   if (err && pages.length === 0) {
@@ -1025,10 +1208,15 @@ function LocatePanel({
         <button className="ghost" onClick={() => setPageNo((p) => Math.min(pages.length, p + 1))} disabled={pageNo >= pages.length}>
           Next <ArrowRightIcon size={13} />
         </button>
-        <span className="muted small">· {boxes.length} boxes · {selected.size} selected</span>
+        <span className="muted small">
+          · {boxes.length} boxes · {selected.size} on this page
+          {pagesWithSelection.length > 1 && (
+            <> · {totalSelected} total across pp.{pagesWithSelection.join(", ")}</>
+          )}
+        </span>
         <span className="spacer" />
-        <button className="ghost" onClick={() => setSelected(new Set())} disabled={selected.size === 0}>Clear</button>
-        <button className="primary" onClick={save} disabled={submitting || selected.size === 0}>
+        <button className="ghost" onClick={clearAll} disabled={totalSelected === 0}>Clear all</button>
+        <button className="primary" onClick={save} disabled={submitting || totalSelected === 0}>
           {submitting ? "Saving…" : (
             <>
               <CheckIcon size={13} /> Use selection for {field.label}
@@ -1039,7 +1227,7 @@ function LocatePanel({
 
       <p className="muted small" style={{ margin: "0 0 8px" }}>
         Drag to select multiple at once. Shift-drag to deselect a region.
-        Click any box to toggle it individually.
+        Click any box to toggle it individually. Selections on other pages are kept.
       </p>
       <div
         ref={canvasRef}

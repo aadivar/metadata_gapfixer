@@ -316,16 +316,21 @@ export async function rejectField(id: number, fieldPath: string): Promise<{ ok: 
   return r.json();
 }
 
+export type LocateSelection = { page: number; box_ids: number[] };
+
 export async function locateField(
   id: number,
   fieldPath: string,
   page: number,
-  boxIds: number[]
+  boxIds: number[],
+  selections?: LocateSelection[],
 ): Promise<{ ok: boolean; value: any; score: Scorecard }> {
+  const body: any = { field_path: fieldPath, page, box_ids: boxIds };
+  if (selections && selections.length > 0) body.selections = selections;
   const r = await fetch(`${API}/submissions/${id}/locate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ field_path: fieldPath, page, box_ids: boxIds }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) {
     const text = await r.text();

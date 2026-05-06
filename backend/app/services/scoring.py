@@ -233,11 +233,35 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
     """Decide whether a field is present, and return a short preview string."""
     f = fs.facts
     m = meta or {}
+    prov = m.get("provenance") or {}
 
     def _v(key: str) -> Any:
         return m.get(key)
 
+    def _rejected(*paths: str) -> bool:
+        """True if the editor rejected ANY of these paths and is awaiting
+        re-locate. Used to suppress factsheet fallback after a reject —
+        otherwise the field would stay 'present' from the factsheet copy
+        and the card would never flip out of 'confirmed' / 'pending'."""
+        return any((prov.get(p) or {}).get("source") == "needs_locate" for p in paths)
+
+    REJECTED_PREVIEW = "rejected — re-locate on the document"
+
+    def _authors_or_factsheet() -> list[dict]:
+        # Prefer saved metadata authors. Only fall back to factsheet when
+        # metadata has nothing AND the editor hasn't rejected the path.
+        # Without the rejection check, the factsheet copy would keep the
+        # field 'present' after a reject and the card would never flip.
+        metadata_authors = _v("authors")
+        if metadata_authors:
+            return list(metadata_authors)
+        if _rejected("authors"):
+            return []
+        return [a.model_dump() for a in fs.authors]
+
     if field == "doi":
+        if _rejected("doi"):
+            return (False, REJECTED_PREVIEW)
         v = _v("doi") or f.doi
         return (bool(v), v)
     if field == "title":
@@ -247,22 +271,26 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
         v = _v("journal_title")
         return (bool(v), v)
     if field == "issn":
+        if _rejected("issn_print", "issn_electronic"):
+            return (False, REJECTED_PREVIEW)
         v = _v("issn_print") or _v("issn_electronic") or (f.issns[0] if f.issns else None)
         return (bool(v), v)
     if field == "publication_year":
+        if _rejected("publication_date"):
+            return (False, REJECTED_PREVIEW)
         v = _v("publication_date") or (f.pdf_xmp.get("creationDate") if isinstance(f.pdf_xmp, dict) else None)
         return (bool(v), str(v)[:10] if v else None)
     if field == "authors_any":
-        n = len(_v("authors") or fs.authors or [])
-        return (n > 0, f"{n} authors" if n else None)
+        n = len(_authors_or_factsheet())
+        return (n > 0, f"{n} authors" if n else "rejected — re-locate authors on the document" if _rejected("authors") else None)
 
     if field == "abstract":
         v = _v("abstract")
         return (bool(v), f"{len(v)} chars" if v else None)
     if field == "full_author_names":
-        authors = _v("authors") or [a.model_dump() for a in fs.authors]
+        authors = _authors_or_factsheet()
         if not authors:
-            return (False, None)
+            return (False, "rejected — re-locate authors on the document" if _rejected("authors") else None)
         # Saved metadata uses `given_name`; factsheet's Author model uses `given`.
         # Accept either, plus `full_name` as a final fallback.
         complete = sum(
@@ -279,6 +307,8 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
         v = _v("volume") or _v("first_page")
         return (bool(v), f"vol={_v('volume')} pages={_v('first_page')}-{_v('last_page')}" if v else None)
     if field == "license_url":
+        if _rejected("license_url"):
+            return (False, REJECTED_PREVIEW)
         v = _v("license_url") or f.license_url
         return (bool(v), v)
     if field == "references_any":
@@ -288,7 +318,7 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
         # Two angles:
         #   1) every author has at least one affiliation string attached
         #   2) we have at least one affiliation overall
-        authors = _v("authors") or [a.model_dump() for a in fs.authors]
+        authors = _authors_or_factsheet()
         if not authors:
             return (False, "no authors yet — extract those first")
         with_aff = sum(1 for a in authors if (a.get("affiliations") or []))
@@ -307,20 +337,20 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
         return (ok, f"{len(unique_affs)} unique · {with_aff}/{len(authors)} authors linked")
 
     if field == "orcid_for_corresponding":
-        authors = _v("authors") or [a.model_dump() for a in fs.authors]
+        authors = _authors_or_factsheet()
         corr = [a for a in authors if a.get("is_corresponding")]
         if not corr:
             return (False, "no corresponding author marked")
         ok = all(a.get("orcid") for a in corr)
         return (ok, f"{sum(1 for a in corr if a.get('orcid'))}/{len(corr)} have ORCID")
     if field == "orcid_for_all_authors":
-        authors = _v("authors") or [a.model_dump() for a in fs.authors]
+        authors = _authors_or_factsheet()
         if not authors:
             return (False, None)
         with_orcid = sum(1 for a in authors if a.get("orcid"))
         return (with_orcid == len(authors), f"{with_orcid}/{len(authors)} have ORCID")
     if field == "ror_for_all_affiliations":
-        authors = _v("authors") or [a.model_dump() for a in fs.authors]
+        authors = _authors_or_factsheet()
         # Map each unique affiliation STRING → did any author resolve it
         # to a ROR? (Multiple authors at the same institution share both
         # the string and the ROR — counting either side without dedup
@@ -370,9 +400,13 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
         # Out of scope for deterministic detection — flag as missing for now
         return (False, None)
     if field == "oa_indicator":
+        if _rejected("is_open_access", "license_url"):
+            return (False, REJECTED_PREVIEW)
         return (bool(f.is_open_access_license or _v("license_url")), "license is OA" if f.is_open_access_license else None)
 
     if field == "preprint_relation":
+        if _rejected("preprint_doi"):
+            return (False, REJECTED_PREVIEW)
         v = f.preprint_doi or _v("preprint_doi")
         return (bool(v), v)
     if field == "crossmark_policy":
@@ -412,6 +446,8 @@ _FIELD_KEY_TO_PATHS: dict[str, list[str]] = {
     "publication_date_full": ["publication_date"],
     "volume_issue_pages": ["volume", "issue", "first_page"],
     "license_url": ["license_url"],
+    "authors_any": ["authors"],
+    "full_author_names": ["authors"],
     "affiliations_listed": ["authors"],   # affiliations live as a sub-property of authors
     "preprint_relation": ["preprint_doi"],
     "oa_indicator": ["is_open_access"],

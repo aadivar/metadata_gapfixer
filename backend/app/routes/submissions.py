@@ -449,27 +449,55 @@ def post_confirm(sub_id: int, req: ConfirmRequest):
     return {"ok": True, "field_path": req.field_path, "score": score(fs, meta).model_dump()}
 
 
-class LocateRequest(BaseModel):
-    field_path: str
+class LocateSelection(BaseModel):
     page: int
     box_ids: list[int]
 
 
+class LocateRequest(BaseModel):
+    field_path: str
+    page: int = 0
+    box_ids: list[int] = []
+    # Multi-page selections: the editor lasso'd boxes across multiple pages
+    # (e.g. a reference list that spans pp.45-49). When provided, takes
+    # priority over the single-page (page, box_ids) form.
+    selections: list[LocateSelection] | None = None
+
+
 @router.post("/{sub_id}/locate")
 def post_locate(sub_id: int, req: LocateRequest):
-    """Editor pointed to box(es) on a PDF page to fill a field. Joins the
-    text of the selected boxes, optionally regex-extracts an identifier if
-    the field expects one (DOI / ORCID / ISSN), and writes the value into
-    metadata with provenance source='user_locate'."""
+    """Editor pointed to box(es) on a PDF page (or pages) to fill a field.
+    Joins the text of the selected boxes, optionally regex-extracts an
+    identifier if the field expects one (DOI / ORCID / ISSN), and writes
+    the value into metadata with provenance source='user_locate'."""
     import re as _re
     from ..services.autofix import _apply_value_at_path
     from ..services.scoring import score
 
     layout = _load_layout(sub_id)
-    page = next((p for p in layout["pages"] if p["page"] == req.page), None)
-    if not page:
-        raise HTTPException(404, f"page {req.page} not found")
-    selected = [b for b in page["boxes"] if b["id"] in set(req.box_ids)]
+
+    # Normalise to a list of (page, box_ids) tuples, in page order.
+    selections: list[tuple[int, set[int]]]
+    if req.selections:
+        selections = [(s.page, set(s.box_ids)) for s in req.selections if s.box_ids]
+    elif req.page and req.box_ids:
+        selections = [(req.page, set(req.box_ids))]
+    else:
+        selections = []
+    if not selections:
+        raise HTTPException(400, "no boxes selected")
+    selections.sort(key=lambda t: t[0])
+
+    selected: list[dict] = []
+    pages_used: list[int] = []
+    for pg, ids in selections:
+        page_doc = next((p for p in layout["pages"] if p["page"] == pg), None)
+        if not page_doc:
+            raise HTTPException(404, f"page {pg} not found")
+        page_selected = [b for b in page_doc["boxes"] if b["id"] in ids]
+        if page_selected:
+            selected.extend(page_selected)
+            pages_used.append(pg)
     if not selected:
         raise HTTPException(400, "no boxes selected")
     joined = " ".join((b.get("text") or "").strip() for b in selected if b.get("text"))
@@ -509,30 +537,60 @@ def post_locate(sub_id: int, req: LocateRequest):
             value = f"https://ror.org/{joined.strip()}"
             extraction_note = " (ROR ID coerced to URL form)"
     elif fp_low in ("references", "references_any", "references_with_doi"):
-        # Split selected text into individual references; regex-extract DOIs
-        # alongside the raw text. This is the free pass that bumps both
-        # `references_any` (count > 0) and partly `references_with_doi`
-        # before any LLM call. Separators: a digit-bullet at line start,
-        # bracketed numbering "[12]", or a blank-line gap.
-        raw = "\n".join((b.get("text") or "") for b in selected if b.get("text"))
-        # Normalise whitespace per line, drop empties
-        lines = [_re.sub(r"\s+", " ", ln).strip() for ln in raw.split("\n")]
-        lines = [ln for ln in lines if ln]
-        # Re-join then split on common reference numbering patterns
-        merged = " ".join(lines)
-        chunks = _re.split(
-            r"(?:^|\s)(?:\(?\[?\d{1,3}[\.\)\]]\s+|\b\d{1,3}\.\s+(?=[A-Z]))",
-            merged,
+        # Split the selected boxes into individual references. Strategy:
+        #   1. Each selected box is a candidate reference — Docling usually
+        #      produces one bbox per reference in a reference list.
+        #   2. Boxes that don't open with a numbered marker ("1.", "[1]")
+        #      or a Vancouver-style "Surname Initials," pattern are treated
+        #      as continuations of the previous reference (paragraph wrap).
+        #   3. Any merged group that still looks like multiple refs run
+        #      together gets an inline split as a fallback.
+        # This handles both numbered (`1. Singh RK ...`) and unnumbered
+        # author-year styles (`Singh RK, Dhama K ... PMID: 31006350 Ukoaka
+        # BM, Okesanya OJ ...`).
+        # Each selected box is treated as one candidate reference — Docling's
+        # layout analysis nearly always produces one bbox per ref in a
+        # reference list, and the editor's selection is what we trust.
+        # Continuation-merging tripped on edge cases (`de Wit E,`, `Lo MK,`,
+        # `Aditi, Shariff M.`, hyphenated initials) and silently lost refs,
+        # so we drop it.
+        # The inline-split fallback below catches the rare box that contains
+        # two refs concatenated.
+        inline_split_re = _re.compile(
+            r"(?<=[.\d])\s+(?=[A-Z][A-Za-zÀ-ſ\-]{2,}(?:[ \-][A-Z][A-Za-zÀ-ſ\-]{2,})?\s+[A-Z]{1,4},)"
         )
-        chunks = [c.strip() for c in chunks if c and len(c.strip()) >= 30]
+
+        box_texts: list[str] = []
+        for b in selected:
+            t = _re.sub(r"\s+", " ", (b.get("text") or "")).strip()
+            if t and len(t) >= 30:
+                box_texts.append(t)
+        # Drop a leading "References" / "Bibliography" section header
+        if box_texts and box_texts[0].lower().strip(": ").startswith(("references", "bibliography")):
+            box_texts = box_texts[1:]
+
+        chunks: list[str] = []
+        for t in box_texts:
+            for p in inline_split_re.split(t):
+                p = p.strip()
+                if p and len(p) >= 30:
+                    chunks.append(p)
+
         doi_re = _re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", _re.IGNORECASE)
         year_re = _re.compile(r"\b(19|20)\d{2}\b")
+        # PDF text extraction often breaks long URLs at the slashes (e.g.
+        # `10.1093/ bioinformatics/bty560`). Glue those back together
+        # before running the strict DOI regex so we don't lose the DOI.
+        doi_glue_re = _re.compile(
+            r"(\b10\.\d{4,9}/)\s+([A-Za-z0-9])"
+        )
         refs: list[dict] = []
         for c in chunks:
-            doi_m = doi_re.search(c)
+            normalised = doi_glue_re.sub(r"\1\2", c)
+            doi_m = doi_re.search(normalised)
             year_m = year_re.search(c)
             refs.append({
-                "raw": c[:600],
+                "raw": c[:1000],
                 "doi": (doi_m.group(0).rstrip(".,;)]>") if doi_m else None),
                 "title": None,
                 "year": int(year_m.group(0)) if year_m else None,
@@ -542,12 +600,13 @@ def post_locate(sub_id: int, req: LocateRequest):
         with_doi = sum(1 for r in refs if r["doi"])
         value = refs
         extraction_note = (
-            f" (regex-split {len(refs)} refs; {with_doi} DOIs found inline)"
+            f" (split {len(refs)} refs from {len(box_texts)} boxes; {with_doi} DOIs found inline)"
         )
         # Force the write target to `references` regardless of which
         # rubric key the editor clicked Locate on.
         req = LocateRequest(
-            page=req.page, box_ids=req.box_ids, field_path="references",
+            page=req.page, box_ids=req.box_ids, selections=req.selections,
+            field_path="references",
         )
 
     meta = _load_metadata(sub_id)
@@ -558,15 +617,41 @@ def post_locate(sub_id: int, req: LocateRequest):
         raise HTTPException(400, f"could not write to {req.field_path}: {exc}")
 
     prov = meta.setdefault("provenance", {})
+    pages_label = (
+        f"page {pages_used[0]}" if len(pages_used) == 1
+        else f"pages {pages_used[0]}–{pages_used[-1]}" if pages_used
+        else "selection"
+    )
     prov[req.field_path] = {
         "source": "user_locate",
         "confidence": 1.0,
         "confirmed": True,
-        "reasoning": f"Editor pointed to {len(selected)} box(es) on page {req.page}{extraction_note}.",
-        "located_page": req.page,
-        "located_box_ids": req.box_ids,
+        "reasoning": f"Editor pointed to {len(selected)} box(es) on {pages_label}{extraction_note}.",
+        "located_page": pages_used[0] if pages_used else req.page,
+        "located_pages": pages_used,
+        "located_box_ids": [b["id"] for b in selected],
         "located_text": joined[:400],
     }
+
+    # When references just got written via locate, run the free
+    # Crossref→OpenAlex bibliographic lookup pass on every ref that didn't
+    # already have an inline DOI. The XML deposit needs DOIs, and waiting
+    # for the editor to remember to click "Run automated extraction" leads
+    # to incomplete deposits.
+    if req.field_path == "references" and isinstance(value, list):
+        try:
+            from ..services.autofix import _autofix_references
+            with get_session() as s:
+                sub = s.get(Submission, sub_id)
+                docling_doc = (
+                    json.loads(Path(sub.docling_json_path).read_text())
+                    if sub and sub.docling_json_path else {}
+                )
+            _autofix_references(meta, fs, docling_doc)
+        except Exception:
+            # Lookup is best-effort — never block the locate write on it.
+            pass
+
     _save_metadata(sub_id, meta)
     return {
         "ok": True,

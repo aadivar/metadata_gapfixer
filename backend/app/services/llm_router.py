@@ -53,7 +53,7 @@ TASK_CONFIG: dict[str, TaskConfig] = {
     "structure_authors":    TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=4_000, max_output_tokens=2_000),
     "structure_references": TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=8_000, max_output_tokens=3_500),
     "structure_funding":    TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=2_500, max_output_tokens=1_200),
-    "structure_credit":     TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=3_000, max_output_tokens=1_500),
+    "structure_credit":     TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=3_000, max_output_tokens=4_000),
     "verify_authors":       TaskConfig(model=_DEFAULT_MODEL, max_input_tokens=4_000, max_output_tokens=1_500),
     "premium":            TaskConfig(model="gpt-4o", max_input_tokens=8_000, max_output_tokens=4_000),
 }
@@ -191,6 +191,16 @@ class LLMRouter:
                 log.warning("submission cost ceiling exceeded: %.4f > %.4f", ledger["total_usd"], cap_usd)
 
         content = resp.choices[0].message.content or "{}"
+        # When the model hits its max_output_tokens cap mid-object, the
+        # JSON gets truncated and pydantic raises a confusing "EOF while
+        # parsing" error. Surface that as an actionable message.
+        finish_reason = getattr(resp.choices[0], "finish_reason", None)
+        if finish_reason == "length":
+            raise RuntimeError(
+                f"LLM output truncated at max_output_tokens={cfg.max_output_tokens} "
+                f"for task '{task}'. Bump TASK_CONFIG['{task}'].max_output_tokens "
+                f"or shrink the input."
+            )
         return schema.model_validate_json(content)
 
 
