@@ -29,6 +29,54 @@ score tells you *what's missing*, this tool helps you *fix it*.
 
 ---
 
+## Screenshots
+
+### Scorecard overview
+
+![Review page — scorecard overview](screenshot.png)
+
+The whole paper on one screen. The big number on the left is the
+**Research Nexus score** (weighted across Provenance · People · Funding
+· Access · Organizations); the banner next to it tracks the **Mandatory
+deposit gate** ("5/9 fields · Not yet depositable") which must be
+satisfied before the deposit XML can be generated. Each dimension bar
+shows its current score and field-completion ratio.
+
+Below the hero, the six dimensions collapse by default — editors drill
+into one section at a time. Each header shows the weight badge
+(`GATE`/`25%`/`20%`/...), the dimension's score, the `N/M fields`
+counter, and a `· X need attention` hint when there's open work, so the
+collapsed view is enough to plan a session without expanding anything.
+The hero buttons are the publisher-controlled spend: **Run automated
+extraction** (free pass — regex / Docling / free APIs), **Run AI
+enrichment** with the upfront cost preview, and **Generate Crossref
+XML** which is gated on the Mandatory banner.
+
+### Locate flow with paginated references
+
+![Provenance section expanded — locate flow](screenshot-1.png)
+
+Expanding a dimension reveals the field cards and the
+locate-in-document workflow that powers most editorial actions.
+Pictured: the **Provenance** dimension after the editor clicked
+**Identify on document** on References. The PDF renders inline at the
+right resolution for box-level selection — drag a lasso to multi-select
+boxes, shift-drag to deselect, and switch pages without losing the
+selection on the previous page (multi-page reference lists Just Work).
+The selected text is processed lookup-first: inline DOI regex →
+Crossref bibliographic search → OpenAlex match. AI is reserved for the
+ambiguous leftovers, opt-in.
+
+Notice the layout: the dimension headers keep showing their score and
+counter even while one is open, so editors can monitor overall progress
+without scrolling back to the hero. Confirmed fields render as
+collapsible cards under "Confirmed"; fields that still need attention
+appear under "Needs attention" with the next-best-action button (Run
+lookup · free / Identify on document / Confirm / Reject and
+re-identify) — never more than one primary CTA per state.
+
+---
+
 ## Categorisation: one Mandatory gate + five Research Nexus dimensions
 
 Aligned with the **[Crossref Research Nexus](https://www.crossref.org/research-nexus/)**
