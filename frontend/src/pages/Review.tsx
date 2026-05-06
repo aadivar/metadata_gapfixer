@@ -761,6 +761,18 @@ const AUTHOR_VIEW_FIELDS: Record<string, AuthorsListMode> = {
 
 const REFERENCES_VIEW_FIELDS = new Set(["references_any", "references_with_doi"]);
 
+// Autofix actions that run a free external lookup (ROR / ORCID / Crossref +
+// OpenAlex) against entities already extracted into metadata. For these,
+// the missing-state CTA should be "Run lookup" — not "Identify on document",
+// since the source text is already in meta. Locating in the PDF wouldn't
+// help: the editor would re-point at the same affiliation/author/citation
+// the autofix is about to query.
+const LOOKUP_ACTIONS = new Set([
+  "resolve_orcids",
+  "resolve_rors",
+  "resolve_references",
+]);
+
 const REFS_PAGE_SIZE = 10;
 function ReferencesView({ subId, mode }: { subId: number; mode: "all" | "with_doi" }) {
   const [refs, setRefs] = useState<any[] | null>(null);
@@ -929,17 +941,31 @@ function FieldCard({
 
           {state === "missing" && (
             <div className="actions">
-              <button className="primary" onClick={() => setLocateOpen((v) => !v)} disabled={busy}
-                      title={
-                        field.llm_leverage === "ai" && field.structurer_task
-                          ? `Pick the section on the page; we'll send the selected text to ${field.structurer_task} (~$${(field.ai_cost_estimate ?? 0).toFixed(4)}).`
-                          : "Pick the box(es) on the page that contain this field's value."
-                      }>
-                Identify on document
-                {field.llm_leverage === "ai" && field.structurer_task && (
-                  <span className="btn-meta">AI · ~${(field.ai_cost_estimate ?? 0).toFixed(4)}</span>
-                )}
-              </button>
+              {field.autofix_action && LOOKUP_ACTIONS.has(field.autofix_action) && onAutofix ? (
+                <>
+                  <button className="primary" onClick={onAutofix} disabled={busy}
+                          title={`Look up via free APIs (ROR / ORCID / Crossref). Clear winners are written; ambiguous matches are flagged for adjudication; nothing is invented when there's no good match.`}>
+                    Run lookup
+                    <span className="btn-meta">free</span>
+                  </button>
+                  <button className="ghost" onClick={() => setLocateOpen((v) => !v)} disabled={busy}
+                          title="Manually point to the value on the document if the lookup couldn't find it.">
+                    Identify on document
+                  </button>
+                </>
+              ) : (
+                <button className="primary" onClick={() => setLocateOpen((v) => !v)} disabled={busy}
+                        title={
+                          field.llm_leverage === "ai" && field.structurer_task
+                            ? `Pick the section on the page; we'll send the selected text to ${field.structurer_task} (~$${(field.ai_cost_estimate ?? 0).toFixed(4)}).`
+                            : "Pick the box(es) on the page that contain this field's value."
+                        }>
+                  Identify on document
+                  {field.llm_leverage === "ai" && field.structurer_task && (
+                    <span className="btn-meta">AI · ~${(field.ai_cost_estimate ?? 0).toFixed(4)}</span>
+                  )}
+                </button>
+              )}
             </div>
           )}
 

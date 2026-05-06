@@ -81,8 +81,8 @@ RUBRIC: list[FieldDef] = [
 
     # ─── People (20%) — author identity + contributor roles ─────────────────
     FieldDef(key="full_author_names",     label="Full author names (not initials)",    tier="T1", dimension="people",      weight=6, bucket="high",   autofix_action="from_factsheet",       llm_leverage="ai", ai_cost_estimate=0.0006, structurer_task="structure_authors", why="AI splits given/surname and resolves messy formatting."),
-    FieldDef(key="orcid_for_corresponding", label="ORCID for corresponding author",    tier="T2", dimension="people",      weight=8, bucket="high",   autofix_action="resolve_orcids",       llm_leverage="ai", ai_cost_estimate=0.001,  structurer_task="verify_authors",   why="Verified by AI across ORCID + OpenAlex + ROR."),
-    FieldDef(key="orcid_for_all_authors", label="ORCID for every author",              tier="T2", dimension="people",      weight=7, bucket="high",   autofix_action="resolve_orcids",       llm_leverage="ai", ai_cost_estimate=0.011,  structurer_task="verify_authors",   why="Full author disambiguation across ORCID + OpenAlex + ROR with cited evidence."),
+    FieldDef(key="orcid_for_corresponding", label="ORCID for corresponding author",    tier="T2", dimension="people",      weight=8, bucket="high",   autofix_action="resolve_orcids",       llm_leverage="api", ai_cost_estimate=0.001,  structurer_task="verify_authors",   why="ORCID API lookup by name + affiliation. Clear winner auto-accepted; ambiguous matches flagged for AI disambiguation; nothing invented."),
+    FieldDef(key="orcid_for_all_authors", label="ORCID for every author",              tier="T2", dimension="people",      weight=7, bucket="high",   autofix_action="resolve_orcids",       llm_leverage="api", ai_cost_estimate=0.011,  structurer_task="verify_authors",   why="ORCID API lookup per author. Multi-source AI verification (verify_authors) is a paid fallback for low-confidence picks."),
     FieldDef(key="credit_roles",          label="CRediT contributor roles",            tier="T3", dimension="people",      weight=6, bucket="high",                                          llm_leverage="ai", ai_cost_estimate=0.0005, structurer_task="structure_credit", why="LLM maps free-text contributions onto the 14-role CRediT taxonomy."),
 
     # ─── Funding (20%) — funder + award ─────────────────────────────────────
@@ -98,7 +98,7 @@ RUBRIC: list[FieldDef] = [
 
     # ─── Organizations (15%) — affiliations + RORs ──────────────────────────
     FieldDef(key="affiliations_listed",   label="Affiliations extracted",              tier="T1", dimension="organizations", weight=6, bucket="high", autofix_action="from_factsheet",       llm_leverage="ai", ai_cost_estimate=0.0006, structurer_task="structure_authors", why="Per-author affiliation strings are required to attach ROR IDs."),
-    FieldDef(key="ror_for_all_affiliations", label="ROR for every affiliation",        tier="T2", dimension="organizations", weight=7, bucket="high", autofix_action="resolve_rors",         llm_leverage="ai", ai_cost_estimate=0.0,    structurer_task="verify_authors",   why="Resolved as part of the per-author verification (no extra cost)."),
+    FieldDef(key="ror_for_all_affiliations", label="ROR for every affiliation",        tier="T2", dimension="organizations", weight=7, bucket="high", autofix_action="resolve_rors",         llm_leverage="api", ai_cost_estimate=0.0,    structurer_task="verify_authors",   why="ROR API lookup per affiliation. Auto-accepts the clear winner (top score ≥ 0.95 with 0.10 margin); ambiguous matches become needs_pick; no synthesis."),
 ]
 
 

@@ -308,6 +308,16 @@ def _autofix_oa(meta: dict, fs: Factsheet) -> AutofixReport:
 # the /disambiguate endpoint.
 
 def _autofix_orcids(meta: dict, fs: Factsheet) -> AutofixReport:
+    """Look up ORCID for each author by (given, family, affiliation).
+
+    Behaviour matches the user-stated rule "lookup-first, never synthesise":
+      - Sole candidate returned by the affiliation-restricted query → accept
+        (the affiliation filter is strict enough that a singleton is reliable).
+      - Multiple candidates → flag as needs_pick; the editor can adjudicate
+        manually or pay for verify_authors.
+      - Zero candidates → drop silently (provenance source="no_candidates"),
+        do NOT write a placeholder ID.
+    """
     authors = _ensure_authors(meta, fs)
     orcid = ORCIDClient()
     resolved = needs_pick = no_candidates = 0
@@ -324,14 +334,18 @@ def _autofix_orcids(meta: dict, fs: Factsheet) -> AutofixReport:
         path = f"authors[{i}].orcid"
         if not candidates:
             no_candidates += 1
+            # Silent drop: keep a.orcid as None, mark provenance so the
+            # editor can see the lookup ran but found nothing.
             _set_prov(meta, path, source="no_candidates", confidence=0.0,
                       reasoning=f"ORCID API returned no matches for given='{given}' family='{family}' aff='{affil}'.")
         elif len(candidates) == 1:
             a["orcid"] = candidates[0]["orcid"]
             _set_prov(meta, path, source="orcid_api", confidence=1.0,
-                      reasoning="Sole candidate returned by ORCID search.")
+                      reasoning="Sole candidate returned by ORCID search restricted by name + affiliation.")
             resolved += 1
         else:
+            # Multiple candidates: do NOT pick one. Attach the list and
+            # flag needs_pick — the editor (or paid verify_authors) decides.
             entry = meta.setdefault("provenance", {})
             entry[path] = {
                 "source": "needs_pick",
