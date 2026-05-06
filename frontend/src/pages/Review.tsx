@@ -809,11 +809,22 @@ function FundersView({ subId }: { subId: number }) {
           <div className="author-main">
             <span className="author-name">{fu.name || "(unnamed funder)"}</span>
             {fu.doi ? (
-              <a className="chip chip-orcid" href={fu.doi} target="_blank" rel="noreferrer">
-                Funder DOI
+              <a className="chip chip-orcid"
+                 href={fu.doi.startsWith("http") ? fu.doi : `https://doi.org/${fu.doi}`}
+                 target="_blank" rel="noreferrer"
+                 title="Crossref Funder Registry DOI — used by the deposit XML">
+                Funder DOI {fu.doi.replace(/^https?:\/\/doi\.org\//, "")}
               </a>
             ) : (
               <span className="chip chip-missing">no Funder DOI</span>
+            )}
+            {fu.ror_id ? (
+              <a className="chip chip-ror" href={fu.ror_id} target="_blank" rel="noreferrer"
+                 title="Research Organization Registry — cross-reference for research-integrity tooling">
+                {fu.ror_id.replace("https://ror.org/", "ROR ")}
+              </a>
+            ) : (
+              <span className="chip chip-missing">no ROR</span>
             )}
           </div>
           {(fu.award_numbers && fu.award_numbers.length > 0) ? (

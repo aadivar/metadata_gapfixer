@@ -35,6 +35,17 @@ log = logging.getLogger("autofix")
 # Provenance helper
 # ============================================================================
 
+def _norm_doi(doi: str | None) -> str | None:
+    """Lower-case + strip the doi.org URL prefix so 'https://doi.org/10.X/Y',
+    'doi:10.X/Y', and '10.X/Y' all compare equal."""
+    if not doi:
+        return None
+    s = doi.strip().lower()
+    s = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", s)
+    s = re.sub(r"^doi:\s*", "", s)
+    return s or None
+
+
 def _set_prov(meta: dict, path: str, *, source: str, confidence: float = 1.0,
               reasoning: str = "", alternatives: list | None = None) -> None:
     prov = meta.setdefault("provenance", {})
@@ -433,9 +444,22 @@ def _autofix_rors(meta: dict, fs: Factsheet) -> AutofixReport:
 
 
 def _autofix_funders(meta: dict, fs: Factsheet) -> AutofixReport:
+    """Resolve each funder against TWO registries:
+
+      1. Crossref Funder Registry (via OpenAlex) — required for the
+         Crossref deposit XML's <funder><DOI> element.
+      2. ROR — useful as a cross-reference; the same organisation is
+         often listed in both registries with different IDs (e.g. NIH
+         is `10.13039/100000002` in the Funder Registry and
+         `https://ror.org/01cwqze88` in ROR).
+
+    Both lookups follow the no-synthesis rule: clear winner accepted,
+    ambiguous flagged needs_pick, no match silently dropped.
+    """
     funders = _ensure_funders(meta, fs)
     oa = OpenAlexClient()
-    resolved = needs_pick = 0
+    resolved_doi = needs_pick_doi = 0
+    resolved_ror = 0
 
     # Clear any prior rejection on the top-level funders entry — the
     # editor explicitly re-ran the lookup, so the stale needs_locate
@@ -444,36 +468,92 @@ def _autofix_funders(meta: dict, fs: Factsheet) -> AutofixReport:
         prov_top = (meta.setdefault("provenance", {}).get("funders") or {})
         if prov_top.get("source") == "needs_locate":
             meta["provenance"]["funders"] = {
-                "source": "factsheet+openalex_api", "confidence": 0.9,
+                "source": "funder_registry_api", "confidence": 0.9,
                 "confirmed": False,
                 "reasoning": "Funders re-derived after rejection.",
             }
 
     for i, fu in enumerate(funders):
-        if fu.get("doi") or not fu.get("name"):
+        name = fu.get("name")
+        if not name:
             continue
-        cands = oa.search_funder(fu["name"])
-        path = f"funders[{i}].doi"
+
+        # Skip the lookup entirely only if both cross-refs are already filled.
+        if fu.get("doi") and fu.get("ror_id"):
+            continue
+
+        cands = oa.search_funder(name)
+        doi_path = f"funders[{i}].doi"
+        ror_path = f"funders[{i}].ror_id"
+
         if not cands:
-            _set_prov(meta, path, source="no_candidates", confidence=0.0,
-                      reasoning=f"OpenAlex returned no funder matches for '{fu['name']}'.")
-        elif len(cands) == 1:
-            fu["doi"] = cands[0].get("doi")
-            _set_prov(meta, path, source="openalex_api", confidence=1.0,
-                      reasoning="Sole funder candidate returned by OpenAlex.")
-            resolved += 1
+            if not fu.get("doi"):
+                _set_prov(meta, doi_path, source="no_candidates", confidence=0.0,
+                          reasoning=f"Funder Registry (OpenAlex) returned no matches for '{name}'.")
+            if not fu.get("ror_id"):
+                _set_prov(meta, ror_path, source="no_candidates", confidence=0.0,
+                          reasoning=f"No OpenAlex funder record for '{name}', so no ROR cross-reference either.")
+            continue
+        # If we already have one of the IDs, the matching candidate from
+        # the search result is unambiguous — pick it. Common case: name
+        # matches >1 OpenAlex funder, but the existing DOI nails down
+        # which row's ROR (or vice versa) we want.
+        existing_doi_norm = _norm_doi(fu.get("doi"))
+        existing_ror_norm = (fu.get("ror_id") or "").rstrip("/")
+        match = None
+        if existing_doi_norm:
+            match = next((c for c in cands if _norm_doi(c.get("doi")) == existing_doi_norm), None)
+        if not match and existing_ror_norm:
+            match = next((c for c in cands if (c.get("ror") or "").rstrip("/") == existing_ror_norm), None)
+        if match:
+            if not fu.get("doi") and match.get("doi"):
+                fu["doi"] = match["doi"]
+                _set_prov(meta, doi_path, source="funder_registry_api", confidence=1.0,
+                          reasoning="Matched OpenAlex funder by ROR cross-reference.")
+                resolved_doi += 1
+            if not fu.get("ror_id") and match.get("ror"):
+                fu["ror_id"] = match["ror"]
+                _set_prov(meta, ror_path, source="funder_registry_api", confidence=1.0,
+                          reasoning="ROR cross-reference from the OpenAlex funder record matched by Funder DOI.")
+                resolved_ror += 1
+            continue
+        if len(cands) == 1:
+            top = cands[0]
+            # OpenAlex's funder record carries the Funder Registry DOI AND
+            # the ROR for the same organisation in its `ids` block, so a
+            # single OpenAlex hit gives both cross-references without a
+            # separate fuzzy ROR search. ROR's standalone fuzzy match on
+            # funder names like "National Institutes of Health" rarely
+            # yields a clear winner.
+            if not fu.get("doi") and top.get("doi"):
+                fu["doi"] = top["doi"]
+                _set_prov(meta, doi_path, source="funder_registry_api", confidence=1.0,
+                          reasoning="Sole candidate returned by Crossref Funder Registry (via OpenAlex).")
+                resolved_doi += 1
+            if not fu.get("ror_id") and top.get("ror"):
+                fu["ror_id"] = top["ror"]
+                _set_prov(meta, ror_path, source="funder_registry_api", confidence=1.0,
+                          reasoning="ROR cross-reference from the same OpenAlex funder record.")
+                resolved_ror += 1
+            elif not fu.get("ror_id"):
+                _set_prov(meta, ror_path, source="no_candidates", confidence=0.0,
+                          reasoning="OpenAlex funder record had no ROR field.")
         else:
-            meta.setdefault("provenance", {})[path] = {
-                "source": "needs_pick", "confidence": 0.0,
-                "reasoning": f"{len(cands)} candidates returned; pick one or use AI to adjudicate.",
-                "candidates": _candidates_to_provenance(cands, ["openalex_id", "doi"]),
-                "query": {"funder_name": fu["name"]},
-                "task": "funder_pick", "source_api": "OpenAlex",
-            }
-            needs_pick += 1
+            if not fu.get("doi"):
+                meta.setdefault("provenance", {})[doi_path] = {
+                    "source": "needs_pick", "confidence": 0.0,
+                    "reasoning": f"{len(cands)} candidates returned; pick one or use AI to adjudicate.",
+                    "candidates": _candidates_to_provenance(cands, ["openalex_id", "doi", "ror"]),
+                    "query": {"funder_name": name},
+                    "task": "funder_pick", "source_api": "Funder Registry (OpenAlex)",
+                }
+                needs_pick_doi += 1
 
     return AutofixReport({"action": "resolve_funders", "ok": True,
-                          "resolved": resolved, "needs_pick": needs_pick,
+                          "resolved_doi": resolved_doi,
+                          "resolved_ror": resolved_ror,
+                          "needs_pick": needs_pick_doi,
+                          "resolved": resolved_doi + resolved_ror,
                           "out_of": len(funders)})
 
 

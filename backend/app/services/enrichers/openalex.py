@@ -46,7 +46,9 @@ class OpenAlexClient(HttpEnricher):
         data = self._get("funders", params={"search": name, "per-page": max_results})
         return [
             {"openalex_id": f.get("id"), "name": f.get("display_name"),
-             "doi": f.get("ids", {}).get("doi"), "country": f.get("country_code")}
+             "doi": f.get("ids", {}).get("doi"),
+             "ror": f.get("ids", {}).get("ror"),
+             "country": f.get("country_code")}
             for f in (data or {}).get("results", [])
         ]
 
