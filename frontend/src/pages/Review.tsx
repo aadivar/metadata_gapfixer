@@ -123,9 +123,29 @@ export default function Review() {
   const [err, setErr] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Dimension sections collapse by default — editors work one section at a
+  // time. The dim-nav at the top expands a section when its chip is clicked.
+  const [expandedDims, setExpandedDims] = useState<Set<Dimension>>(new Set());
   const [metaText, setMetaText] = useState<string>("");
   const [showMeta, setShowMeta] = useState(false);
   const [xmlBuilt, setXmlBuilt] = useState(false);
+
+  function toggleDim(dim: Dimension) {
+    setExpandedDims((prev) => {
+      const next = new Set(prev);
+      if (next.has(dim)) next.delete(dim);
+      else next.add(dim);
+      return next;
+    });
+  }
+  function openDim(dim: Dimension) {
+    setExpandedDims((prev) => {
+      if (prev.has(dim)) return prev;
+      const next = new Set(prev);
+      next.add(dim);
+      return next;
+    });
+  }
 
   async function refresh() {
     try {
@@ -433,7 +453,8 @@ export default function Review() {
           const d = dimensionByKey[dim];
           if (!d || fieldsByDim[dim].length === 0) return null;
           return (
-            <a key={dim} href={`#dim-${dim}`} className="tier-nav-item">
+            <a key={dim} href={`#dim-${dim}`} className="tier-nav-item"
+               onClick={() => openDim(dim)}>
               <span className="tier-nav-code">{dim === "mandatory" ? "GATE" : `${d.weight}%`}</span>
               <span className="tier-nav-label">{d.label}</span>
               <span className="tier-nav-score mono" style={{ color: scoreColor(d.score) }}>
@@ -477,15 +498,24 @@ export default function Review() {
           />
         );
 
+        const isOpen = expandedDims.has(dim);
         return (
-          <section key={dim} id={`dim-${dim}`} className={`tier-section dim-section dim-${dim} ${isMandatory ? "dim-mandatory" : ""}`}>
-            <header className="tier-header">
+          <section key={dim} id={`dim-${dim}`} className={`tier-section dim-section dim-${dim} ${isMandatory ? "dim-mandatory" : ""} ${isOpen ? "dim-open" : "dim-closed"}`}>
+            <header className="tier-header" onClick={() => toggleDim(dim)} style={{ cursor: "pointer" }}>
               <div className="tier-header-left">
                 <span className={`tier-code ${isMandatory ? "tier-code-gate" : ""}`}>
                   {isMandatory ? "GATE" : `${d.weight}%`}
                 </span>
                 <div>
-                  <h2 className="tier-title">{d.label}</h2>
+                  <h2 className="tier-title">
+                    {isOpen ? <ChevronDownIcon size={14} /> : <ChevronRightIcon size={14} />}
+                    {" "}{d.label}
+                    {!isOpen && todo.length > 0 && (
+                      <span className="muted small mono" style={{ marginLeft: 8, fontWeight: 400 }}>
+                        · {todo.length} need attention
+                      </span>
+                    )}
+                  </h2>
                   <p className="tier-desc muted small">{d.description}</p>
                 </div>
               </div>
@@ -504,34 +534,38 @@ export default function Review() {
               </div>
             </header>
 
-            {pillar && (
-              <div className={`dim-pillar nexus-${pillar.status}`} title={pillar.caption}>
-                <span className="nexus-dot" />
-                <div className="dim-pillar-body">
-                  <div className="dim-pillar-row-top">
-                    <span className="dim-pillar-caption">{pillar.caption}</span>
-                    <span className="dim-pillar-frac mono small">
-                      {pillar.denominator > 0 ? `${pillar.numerator}/${pillar.denominator}` : "—"}
-                    </span>
+            {isOpen && (
+              <>
+                {pillar && (
+                  <div className={`dim-pillar nexus-${pillar.status}`} title={pillar.caption}>
+                    <span className="nexus-dot" />
+                    <div className="dim-pillar-body">
+                      <div className="dim-pillar-row-top">
+                        <span className="dim-pillar-caption">{pillar.caption}</span>
+                        <span className="dim-pillar-frac mono small">
+                          {pillar.denominator > 0 ? `${pillar.numerator}/${pillar.denominator}` : "—"}
+                        </span>
+                      </div>
+                      <div className="nexus-pillar-track">
+                        <div className="nexus-pillar-fill" style={{ width: `${pillarPct}%` }} />
+                      </div>
+                    </div>
                   </div>
-                  <div className="nexus-pillar-track">
-                    <div className="nexus-pillar-fill" style={{ width: `${pillarPct}%` }} />
-                  </div>
-                </div>
-              </div>
-            )}
+                )}
 
-            {todo.length > 0 && (
-              <div className="tier-bucket">
-                <h4 className="tier-bucket-title">Needs attention <span className="muted small mono">{todo.length}</span></h4>
-                <div className="field-cards">{todo.map(renderField)}</div>
-              </div>
-            )}
-            {done.length > 0 && (
-              <div className="tier-bucket">
-                <h4 className="tier-bucket-title">Confirmed <span className="muted small mono">{done.length}</span></h4>
-                <div className="field-cards">{done.map(renderField)}</div>
-              </div>
+                {todo.length > 0 && (
+                  <div className="tier-bucket">
+                    <h4 className="tier-bucket-title">Needs attention <span className="muted small mono">{todo.length}</span></h4>
+                    <div className="field-cards">{todo.map(renderField)}</div>
+                  </div>
+                )}
+                {done.length > 0 && (
+                  <div className="tier-bucket">
+                    <h4 className="tier-bucket-title">Confirmed <span className="muted small mono">{done.length}</span></h4>
+                    <div className="field-cards">{done.map(renderField)}</div>
+                  </div>
+                )}
+              </>
             )}
           </section>
         );
