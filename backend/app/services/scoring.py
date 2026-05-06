@@ -383,19 +383,29 @@ def _present(field: str, fs: Factsheet, meta: dict | None) -> tuple[bool, str | 
         with_doi = sum(1 for r in refs if r.get("doi"))
         return (with_doi == len(refs), f"{with_doi}/{len(refs)} have DOI")
     if field == "funder_doi":
+        if _rejected("funders"):
+            return (False, REJECTED_PREVIEW)
         funders = _v("funders") or []
         if not funders:
             return (False, "no funders")
         with_doi = sum(1 for fu in funders if fu.get("doi"))
         return (with_doi == len(funders), f"{with_doi}/{len(funders)} have Funder Registry DOI")
     if field == "award_numbers":
+        if _rejected("funders"):
+            return (False, REJECTED_PREVIEW)
         funders = _v("funders") or []
         grants = f.grant_ids
         if funders:
             ok = all(fu.get("award_numbers") for fu in funders)
             n = sum(len(fu.get("award_numbers") or []) for fu in funders)
-            return (ok, f"{n} award numbers across funders")
-        return (len(grants) > 0, f"{len(grants)} grant IDs detected" if grants else None)
+            preview_ids = [aw for fu in funders for aw in (fu.get("award_numbers") or [])]
+            preview = ", ".join(preview_ids[:3]) + (f" (+{len(preview_ids)-3} more)" if len(preview_ids) > 3 else "")
+            return (ok, f"{n} award numbers · {preview}" if preview else f"{n} award numbers across funders")
+        if grants:
+            preview_ids = [g.get("id") for g in grants if g.get("id")][:3]
+            preview = ", ".join(preview_ids) + (f" (+{len(grants)-3} more)" if len(grants) > 3 else "")
+            return (True, f"{len(grants)} grant IDs detected · {preview}")
+        return (False, None)
     if field == "abstract_jats":
         # Out of scope for deterministic detection — flag as missing for now
         return (False, None)
@@ -459,6 +469,8 @@ _FIELD_KEY_TO_PATHS: dict[str, list[str]] = {
     "credit_roles": ["credit_contributions"],
     "references_any": ["references"],
     "references_with_doi": ["references"],
+    "funder_doi": ["funders"],
+    "award_numbers": ["funders"],
 }
 
 

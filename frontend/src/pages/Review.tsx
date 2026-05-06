@@ -760,6 +760,78 @@ const AUTHOR_VIEW_FIELDS: Record<string, AuthorsListMode> = {
 };
 
 const REFERENCES_VIEW_FIELDS = new Set(["references_any", "references_with_doi"]);
+const FUNDERS_VIEW_FIELDS = new Set(["funder_doi", "award_numbers"]);
+
+function FundersView({ subId }: { subId: number }) {
+  const [funders, setFunders] = useState<any[] | null>(null);
+  const [grants, setGrants] = useState<any[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const [m, fs] = await Promise.all([
+          getMetadata(subId),
+          getFactsheet(subId).catch(() => ({})),
+        ]);
+        setFunders((m.funders || []) as any[]);
+        setGrants(((fs.facts || {}).grant_ids || []) as any[]);
+      } catch (e) { setErr(String(e)); }
+    })();
+  }, [subId]);
+
+  if (err) return <p className="error" style={{ marginTop: 8 }}>{err}</p>;
+  if (funders === null) return <p className="muted small loading">Loading funders</p>;
+
+  if (funders.length === 0 && (grants?.length ?? 0) > 0) {
+    return (
+      <div style={{ marginTop: 8 }}>
+        <p className="muted small">
+          From factsheet (regex-detected). Run the funder-resolve autofix to attach Funder Registry DOIs.
+        </p>
+        <ul className="aff-rows">
+          {grants!.map((g: any, i: number) => (
+            <li key={i} className="aff-row">
+              <span className="aff-text mono">{g.id}</span>
+              {g.funder_hint && <span className="chip credit-initials">{g.funder_hint}</span>}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+  if (funders.length === 0) {
+    return <p className="muted small" style={{ marginTop: 8 }}>No funders on metadata yet.</p>;
+  }
+  return (
+    <ul className="author-rows" style={{ marginTop: 8 }}>
+      {funders.map((fu: any, i: number) => (
+        <li key={i} className="author-row">
+          <div className="author-main">
+            <span className="author-name">{fu.name || "(unnamed funder)"}</span>
+            {fu.doi ? (
+              <a className="chip chip-orcid" href={fu.doi} target="_blank" rel="noreferrer">
+                Funder DOI
+              </a>
+            ) : (
+              <span className="chip chip-missing">no Funder DOI</span>
+            )}
+          </div>
+          {(fu.award_numbers && fu.award_numbers.length > 0) ? (
+            <ul className="aff-rows">
+              {fu.award_numbers.map((aw: string, j: number) => (
+                <li key={j} className="aff-row">
+                  <span className="aff-text mono">{aw}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted small" style={{ marginLeft: 16 }}>no award numbers attached</p>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 // Autofix actions that run a free external lookup (ROR / ORCID / Crossref +
 // OpenAlex) against entities already extracted into metadata. For these,
@@ -918,6 +990,10 @@ function FieldCard({
 
           {REFERENCES_VIEW_FIELDS.has(field.key) && (state === "confirmed" || state === "pending") && (
             <ReferencesView subId={subId} mode={field.key === "references_with_doi" ? "with_doi" : "all"} />
+          )}
+
+          {FUNDERS_VIEW_FIELDS.has(field.key) && (state === "confirmed" || state === "pending" || state === "missing") && (
+            <FundersView subId={subId} />
           )}
 
           {state === "confirmed" && (
