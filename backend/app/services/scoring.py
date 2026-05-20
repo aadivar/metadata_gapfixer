@@ -147,6 +147,11 @@ class FieldScore(BaseModel):
     # Map from the field-key to its actual metadata path(s) so the GUI can call
     # /confirm, /reject, /pick on the right path.
     metadata_paths: list[str] = []
+    # When the Crossref-deposited record has this field, the deposited preview
+    # is attached so the GUI can render "Crossref deposit: 10.1371/…" inline
+    # on the card and offer a one-click accept. Populated by the route handler
+    # in /score after `fetch_deposited_score` succeeds; absent otherwise.
+    deposited_value_preview: str | None = None
 
 
 class TierBreakdown(BaseModel):
@@ -219,6 +224,26 @@ class Scorecard(BaseModel):
     mandatory_total: int = 0
     # Weighted Research Nexus score across the five non-mandatory dimensions
     research_nexus_score: int = 0
+
+    # --- Crossref deposited delta (populated by the /score route when the
+    # editor has marked the article as already-published AND located a DOI
+    # on the PDF). The deposited fields mirror the PDF-side ones so the GUI
+    # can render a side-by-side "Crossref now → After PDF fix" delta. ---
+    #
+    # deposited_status:
+    #   "unknown"        — editor hasn't answered the publication-status question
+    #   "not_deposited"  — editor said "not yet published"; deposited side is N/A
+    #   "no_doi"         — editor said "published" but no confirmed DOI yet
+    #   "fetched"        — Crossref returned a record; deposited fields populated
+    #   "not_found"      — DOI not in Crossref (yet)
+    #   "error"          — Crossref call failed; PDF score is still authoritative
+    deposited_status: str = "unknown"
+    deposited_doi: str | None = None
+    deposited_score: int | None = None        # research-nexus-style weighted % of the deposited record
+    deposited_mandatory_ready: bool | None = None
+    deposited_dimensions: list[DimensionScore] = []
+    deposited_fetched_at: str | None = None
+    deposited_summary: dict[str, Any] | None = None  # counts/highlights for the GUI hover
 
 
 TIER_LABELS = {

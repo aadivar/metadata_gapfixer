@@ -192,7 +192,23 @@ export type FieldScore = {
   provenance_confirmed?: boolean;
   provenance_reasoning?: string | null;
   metadata_paths?: string[];
+  // What Crossref currently has deposited for this field (when /score has a
+  // deposited_status === "fetched" — populated server-side by running the
+  // same _present() preview against the deposited metadata).
+  deposited_value_preview?: string | null;
 };
+
+export async function acceptDeposited(
+  id: number, fieldKey: string
+): Promise<{ ok: boolean; field_key: string; wrote_paths: string[]; score: Scorecard }> {
+  const r = await fetch(`${API}/submissions/${id}/accept_deposited`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ field_key: fieldKey }),
+  });
+  if (!r.ok) throw new Error(`accept_deposited failed: ${r.status} ${await r.text()}`);
+  return r.json();
+}
 
 export type TierBreakdown = {
   deterministic: number;
@@ -225,6 +241,14 @@ export type ResearchNexus = {
   overall_pct: number;
 };
 
+// "unknown" — editor hasn't answered yet
+// "not_deposited" — editor said "not yet published"
+// "no_doi" — editor said "published" but no DOI confirmed via locate yet
+// "fetched" — Crossref returned a record; deposited_* are populated
+// "not_found" — DOI not in Crossref
+// "error" — Crossref call failed (transient)
+export type DepositedStatus = "unknown" | "not_deposited" | "no_doi" | "fetched" | "not_found" | "error";
+
 export type Scorecard = {
   composite: number;
   interpretation: string;
@@ -241,7 +265,38 @@ export type Scorecard = {
   mandatory_present?: number;
   mandatory_total?: number;
   research_nexus_score?: number;
+  // Crossref deposited delta — see backend scoring.py for the full contract.
+  deposited_status?: DepositedStatus;
+  deposited_doi?: string | null;
+  deposited_score?: number | null;
+  deposited_mandatory_ready?: boolean | null;
+  deposited_dimensions?: DimensionScore[];
+  deposited_fetched_at?: string | null;
+  deposited_summary?: Record<string, any> | null;
 };
+
+export type PublicationStatus = {
+  published: boolean | null;
+  set_at: string | null;
+};
+
+export async function getPublicationStatus(id: number): Promise<PublicationStatus> {
+  const r = await fetch(`${API}/submissions/${id}/publication_status`);
+  if (!r.ok) throw new Error(`publication_status get failed: ${r.status}`);
+  return r.json();
+}
+
+export async function setPublicationStatus(
+  id: number, published: boolean | null
+): Promise<{ ok: boolean; publication_status: PublicationStatus; score: Scorecard }> {
+  const r = await fetch(`${API}/submissions/${id}/publication_status`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ published }),
+  });
+  if (!r.ok) throw new Error(`publication_status set failed: ${r.status} ${await r.text()}`);
+  return r.json();
+}
 
 export async function enrichAll(id: number): Promise<{ reports: any[]; score: Scorecard }> {
   const r = await fetch(`${API}/submissions/${id}/enrich/all`, { method: "POST" });

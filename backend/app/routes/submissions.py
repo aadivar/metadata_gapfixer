@@ -203,14 +203,235 @@ def get_references_layout(sub_id: int):
     return detect_references(docling_doc).model_dump()
 
 
+# --- Publication status (the "is this article already on Crossref?" gate) ---
+#
+# Two reasons this lives next to the scorecard:
+#   1. The deposited-side score on the Scorecard only runs when the editor
+#      has confirmed both (a) the article is published and (b) a DOI on the
+#      PDF (via /locate). Without the explicit confirmation we'd be guessing,
+#      and a wrongly-picked citation DOI would make the delta meaningless.
+#   2. The status is per-submission and persists across reloads, so we keep
+#      it as a small JSON artefact alongside the other outputs.
+
+def _publication_status_path(sub_id: int) -> Path:
+    return settings.data_dir / "outputs" / f"{sub_id}_publication.json"
+
+
+def _load_publication_status(sub_id: int) -> dict:
+    p = _publication_status_path(sub_id)
+    if not p.exists():
+        return {"published": None, "set_at": None}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {"published": None, "set_at": None}
+
+
+def _save_publication_status(sub_id: int, payload: dict) -> Path:
+    p = _publication_status_path(sub_id)
+    p.write_text(json.dumps(payload, indent=2, default=str))
+    return p
+
+
+class PublicationStatusRequest(BaseModel):
+    # Tri-state: True = already published with a Crossref DOI, False = not yet,
+    # None = editor hasn't decided (used to clear a previous answer).
+    published: bool | None = None
+
+
+@router.get("/{sub_id}/publication_status")
+def get_publication_status(sub_id: int):
+    return _load_publication_status(sub_id)
+
+
+@router.post("/{sub_id}/publication_status")
+def post_publication_status(sub_id: int, req: PublicationStatusRequest):
+    payload = {
+        "published": req.published,
+        "set_at": datetime.utcnow().isoformat(timespec="seconds"),
+    }
+    _save_publication_status(sub_id, payload)
+    # Recompute score so the GUI gets the new deposited-side data in one round-trip
+    from ..services.scoring import score
+    fs = _load_factsheet(sub_id)
+    meta = _load_metadata(sub_id)
+    sc = _attach_deposited(sub_id, fs, meta, score(fs, meta))
+    return {"ok": True, "publication_status": payload, "score": sc.model_dump()}
+
+
 # --- Scorecard -------------------------------------------------------------
+
+def _confirmed_doi_from_meta(meta: dict) -> str | None:
+    """Return the DOI the editor confirmed by pointing at the PDF (or by an
+    explicit Confirm action) — never a regex-only candidate. This is what
+    gates the deposited-side Crossref fetch.
+
+    Acceptable provenance sources: user_locate, user_pick, user_edit, or any
+    source explicitly marked confirmed=True."""
+    doi = (meta or {}).get("doi")
+    if not doi:
+        return None
+    prov = ((meta or {}).get("provenance") or {}).get("doi") or {}
+    src = (prov.get("source") or "").lower()
+    if prov.get("confirmed") or src in {"user_locate", "user_pick", "user_edit"}:
+        return doi
+    return None
+
+
+def _attach_deposited(sub_id: int, fs, meta: dict, sc):
+    """Populate the Scorecard's deposited_* fields based on publication status
+    and the confirmed DOI. Pure data-merge — score() itself stays untouched."""
+    pub = _load_publication_status(sub_id)
+    published = pub.get("published")
+    if published is False:
+        sc.deposited_status = "not_deposited"
+        return sc
+    if published is None:
+        sc.deposited_status = "unknown"
+        return sc
+
+    confirmed_doi = _confirmed_doi_from_meta(meta)
+    if not confirmed_doi:
+        sc.deposited_status = "no_doi"
+        return sc
+
+    try:
+        from ..services.crossref_score import fetch_deposited_score
+        result = fetch_deposited_score(confirmed_doi)
+    except Exception as exc:
+        log.warning("deposited score lookup failed for sub %s doi=%s: %s",
+                    sub_id, confirmed_doi, exc)
+        sc.deposited_status = "error"
+        sc.deposited_doi = confirmed_doi
+        return sc
+
+    if result is None:
+        sc.deposited_status = "not_found"
+        sc.deposited_doi = confirmed_doi
+        return sc
+
+    sc.deposited_status = "fetched"
+    sc.deposited_doi = result.doi
+    sc.deposited_score = result.research_nexus_score
+    sc.deposited_mandatory_ready = result.mandatory_ready
+    sc.deposited_dimensions = result.dimensions
+    sc.deposited_fetched_at = result.fetched_at
+    sc.deposited_summary = result.raw_summary
+
+    # Per-field deposited previews: run the same _present(key, fs, meta)
+    # logic against the deposited metadata so each rubric field can show
+    # exactly what Crossref has on file. Drives the "Crossref deposit: X"
+    # line + "Use Crossref value" CTA in the GUI.
+    #
+    # We attach the preview whenever Crossref has *anything* for the field,
+    # not only when _present returns True. Partial coverage (e.g. 2/3 authors
+    # with ORCID, 37/78 refs with DOI) is exactly the information the
+    # publisher most needs to see — they can still accept the partial
+    # deposit and improve from there.
+    #
+    # Filter strategy: trust the preview string. `_present` already inspected
+    # the data; if it says "0/N", "no X", "rejected …", skip. Otherwise
+    # attach. We deliberately do NOT cross-check `_FIELD_KEY_TO_PATHS` for
+    # the field, because some rubric keys (orcid_for_*, ror_for_*) live in
+    # `authors[*].orcid` etc. and aren't represented as top-level paths.
+    try:
+        from ..services.scoring import _present
+        from ..services.crossref_score import _empty_factsheet
+        empty_fs = _empty_factsheet()
+        deposited = result.deposited_meta
+        for f in sc.fields:
+            _present_bool, preview = _present(f.key, empty_fs, deposited)
+            if not preview:
+                continue
+            preview_str = str(preview).strip()
+            if not preview_str or preview_str == "—":
+                continue
+            # Skip uninformative "nothing deposited" previews.
+            lowered = preview_str.lower()
+            if (
+                preview_str.startswith("0/")
+                or lowered.startswith("0 ")          # "0 affiliations parsed"
+                or lowered.startswith("no ")          # "no affiliations to resolve"
+                or "rejected" in lowered              # local-reject sentinel, irrelevant on deposit side
+            ):
+                continue
+            f.deposited_value_preview = preview_str
+    except Exception as exc:
+        log.warning("failed to attach deposited per-field previews: %s", exc)
+
+    return sc
+
 
 @router.get("/{sub_id}/score")
 def get_score(sub_id: int):
     from ..services.scoring import score
     fs = _load_factsheet(sub_id)
     meta = _load_metadata(sub_id)
-    return score(fs, meta).model_dump()
+    sc = score(fs, meta)
+    sc = _attach_deposited(sub_id, fs, meta, sc)
+    return sc.model_dump()
+
+
+class AcceptDepositedRequest(BaseModel):
+    field_key: str   # rubric key (e.g. "doi", "title", "authors_any"). The
+                     # backend resolves it to the right metadata path(s) via
+                     # scoring._FIELD_KEY_TO_PATHS.
+
+
+@router.post("/{sub_id}/accept_deposited")
+def post_accept_deposited(sub_id: int, req: AcceptDepositedRequest):
+    """Promote the Crossref-deposited value for a field into local metadata.
+    Used when the editor sees "Crossref deposit: ..." on a missing-field
+    card and clicks "Use Crossref value" instead of locating on the PDF.
+
+    Writes provenance.source="crossref_deposit" and confirmed=True. The
+    editor can still reject later to trigger a re-locate."""
+    from ..services.crossref_score import fetch_deposited_score
+    from ..services.scoring import _FIELD_KEY_TO_PATHS, score
+
+    pub = _load_publication_status(sub_id)
+    if pub.get("published") is not True:
+        raise HTTPException(400, "publication_status.published must be true first")
+    fs = _load_factsheet(sub_id)
+    meta = _load_metadata(sub_id)
+    confirmed_doi = _confirmed_doi_from_meta(meta)
+    if not confirmed_doi:
+        raise HTTPException(400, "no confirmed DOI; locate the DOI on the PDF first")
+
+    result = fetch_deposited_score(confirmed_doi)
+    if result is None:
+        raise HTTPException(404, "Crossref has no record for this DOI")
+
+    paths = _FIELD_KEY_TO_PATHS.get(req.field_key, [])
+    if not paths:
+        raise HTTPException(400, f"unknown field_key: {req.field_key}")
+
+    # Walk each metadata path, copy the deposited value into local metadata,
+    # and write provenance. We don't merge — Crossref's deposited value
+    # replaces whatever was there (the editor explicitly opted in).
+    deposited = result.deposited_meta
+    wrote: list[str] = []
+    prov = meta.setdefault("provenance", {})
+    for p in paths:
+        if p not in deposited or deposited[p] is None or deposited[p] == [] or deposited[p] == "":
+            continue
+        meta[p] = deposited[p]
+        prov[p] = {
+            "source": "crossref_deposit",
+            "confidence": 1.0,
+            "confirmed": True,
+            "reasoning": f"Editor accepted the Crossref-deposited value for {req.field_key}.",
+            "deposited_doi": result.doi,
+            "deposited_at": result.fetched_at,
+        }
+        wrote.append(p)
+
+    if not wrote:
+        raise HTTPException(400, f"Crossref deposit has no value for {req.field_key}")
+
+    _save_metadata(sub_id, meta)
+    sc = _attach_deposited(sub_id, fs, meta, score(fs, meta))
+    return {"ok": True, "field_key": req.field_key, "wrote_paths": wrote, "score": sc.model_dump()}
 
 
 # --- Per-field auto-fix ----------------------------------------------------

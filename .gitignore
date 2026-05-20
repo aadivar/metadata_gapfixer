@@ -9,3 +9,6 @@ dist/
 .pytest_cache/
 .claude/
 CLAUDE.md
+
+# Local-only port-remap override (lisbon-web-1 holds host 3000)
+docker-compose.override.yml

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
+  acceptDeposited,
   autofix,
   autofixAll,
   buildXml,
@@ -24,6 +25,7 @@ import {
   rejectField,
   runStructurer,
   Scorecard,
+  setPublicationStatus,
   Tier,
   xmlDownloadUrl,
 } from "../api";
@@ -282,6 +284,16 @@ export default function Review() {
     finally { setBusy(null); }
   }
 
+  async function acceptFromCrossref(field: FieldScore) {
+    setBusy(`Importing ${field.label} from Crossref…`);
+    try {
+      const res = await acceptDeposited(subId, field.key);
+      setCard(res.score);
+      showToast(`Accepted Crossref value for ${field.label}.`);
+    } catch (e) { setErr(String(e)); }
+    finally { setBusy(null); }
+  }
+
   async function locate(field: FieldScore, page: number, boxIds: number[], joinedText?: string, selections?: LocateSelection[]) {
     const text = (joinedText ?? "").trim();
     // For AI-leverage fields with a structurer task, the located text is fed
@@ -389,8 +401,25 @@ export default function Review() {
         </div>
       </div>
 
-      {/* HERO — Research Nexus score + Mandatory gate */}
+      {/* PUBLICATION-STATUS BANNER — gates the deposited-side delta.
+          The editor must explicitly confirm the article is already published
+          AND locate its DOI on the PDF before we'll fetch the Crossref
+          record. No regex-guessed DOIs — too easy to grab a citation DOI
+          by mistake and make the comparison meaningless. */}
+      <PublicationStatusBanner
+        subId={subId}
+        card={card}
+        onCardUpdate={setCard}
+        onScrollToDoi={() => openDim("mandatory")}
+      />
+
+      {/* HERO — Research Nexus score + Mandatory gate.
+          When the deposited side has been fetched the hero forks into a
+          side-by-side delta view (Crossref now → After PDF fix). */}
       <div className="card scorecard-hero">
+        {card.deposited_status === "fetched" && card.deposited_score != null ? (
+          <DeltaHero card={card} />
+        ) : (
         <div className="hero-grid">
           <div className="hero-score" style={{ borderColor: scoreColor(card.research_nexus_score ?? card.composite) }}>
             <div className="hero-num" style={{ color: scoreColor(card.research_nexus_score ?? card.composite) }}>
@@ -428,6 +457,7 @@ export default function Review() {
             </div>
           </div>
         </div>
+        )}
         <div className="actions">
           <button className="primary" onClick={fixAll} disabled={busy !== null}>
             Run automated extraction
@@ -494,6 +524,7 @@ export default function Review() {
             onAutofix={f.autofix_action ? () => fixOne(f.autofix_action!) : undefined}
             onRunStructurer={f.structurer_task ? () => runStructure(f) : undefined}
             onLocate={(page, boxIds, joinedText, selections) => locate(f, page, boxIds, joinedText, selections)}
+            onAcceptDeposited={f.deposited_value_preview ? () => acceptFromCrossref(f) : undefined}
             busy={busy !== null}
           />
         );
@@ -594,6 +625,238 @@ export default function Review() {
     </section>
   );
 }
+
+// ============================================================================
+// Publication status banner — the "Is this article already in Crossref?" gate
+// that unlocks the deposited-side delta view in the hero.
+// ============================================================================
+
+function PublicationStatusBanner({
+  subId,
+  card,
+  onCardUpdate,
+  onScrollToDoi,
+}: {
+  subId: number;
+  card: Scorecard;
+  onCardUpdate: (sc: Scorecard) => void;
+  onScrollToDoi: () => void;
+}) {
+  const status = card.deposited_status ?? "unknown";
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function set(published: boolean | null) {
+    setErr(null);
+    setBusy(true);
+    try {
+      const res = await setPublicationStatus(subId, published);
+      onCardUpdate(res.score);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function locateDoi() {
+    onScrollToDoi();
+    // Defer to allow the section to expand, then scroll the DOI field card into view
+    setTimeout(() => {
+      const el = document.querySelector('[data-field-key="doi"]');
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 80);
+  }
+
+  // ── State-specific copy ─────────────────────────────────────────────────
+  if (status === "unknown") {
+    return (
+      <div className="card pub-banner">
+        <div className="pub-banner-text">
+          <strong>Is this article already published with a Crossref DOI?</strong>
+          <span className="muted small">
+            {" "}If yes, we'll compare your PDF metadata against what Crossref has on file
+            so you can see exactly which fields you'd be improving.
+          </span>
+        </div>
+        <div className="pub-banner-actions">
+          <button className="accent" onClick={() => set(true)} disabled={busy}>Yes, published</button>
+          <button onClick={() => set(false)} disabled={busy}>Not yet</button>
+        </div>
+        {err && <p className="error small" style={{ marginTop: 8 }}>{err}</p>}
+      </div>
+    );
+  }
+  if (status === "no_doi") {
+    return (
+      <div className="card pub-banner is-prompt">
+        <div className="pub-banner-text">
+          <strong>Next: point to the DOI on the article.</strong>
+          <span className="muted small">
+            {" "}Locate-only — we deliberately don't auto-pick a DOI by regex, since
+            citation DOIs in the references would yield a misleading comparison.
+          </span>
+        </div>
+        <div className="pub-banner-actions">
+          <button className="accent" onClick={locateDoi} disabled={busy}>Identify DOI on document</button>
+          <button onClick={() => set(null)} disabled={busy}>Change answer</button>
+        </div>
+      </div>
+    );
+  }
+  if (status === "not_deposited") {
+    return (
+      <div className="card pub-banner is-info">
+        <div className="pub-banner-text">
+          <strong>Not yet deposited.</strong>
+          <span className="muted small">
+            {" "}Your PDF-derived score is the target — this is what you'd deposit if
+            registered today. No Crossref comparison.
+          </span>
+        </div>
+        <div className="pub-banner-actions">
+          <button onClick={() => set(null)} disabled={busy}>Change answer</button>
+        </div>
+      </div>
+    );
+  }
+  if (status === "not_found") {
+    return (
+      <div className="card pub-banner is-info">
+        <div className="pub-banner-text">
+          <strong>Crossref has no record for this DOI.</strong>
+          <span className="muted small">
+            {" "}Likely the deposit hasn't happened yet. Your PDF score is the target.
+          </span>
+        </div>
+        <div className="pub-banner-actions">
+          <button onClick={() => set(null)} disabled={busy}>Change answer</button>
+        </div>
+      </div>
+    );
+  }
+  if (status === "error") {
+    return (
+      <div className="card pub-banner is-warn">
+        <div className="pub-banner-text">
+          <strong>Couldn't reach Crossref.</strong>
+          <span className="muted small"> The PDF score below is still authoritative. Retry?</span>
+        </div>
+        <div className="pub-banner-actions">
+          <button className="accent" onClick={() => set(true)} disabled={busy}>Retry</button>
+          <button onClick={() => set(null)} disabled={busy}>Change answer</button>
+        </div>
+      </div>
+    );
+  }
+  // status === "fetched" — concise context line; the big delta lives in the hero.
+  return (
+    <div className="card pub-banner is-info">
+      <div className="pub-banner-text">
+        <strong>Comparing against Crossref deposit.</strong>{" "}
+        <span className="muted small mono">
+          {card.deposited_doi}
+          {card.deposited_fetched_at ? ` · fetched ${card.deposited_fetched_at.replace("T", " ")}` : ""}
+        </span>
+      </div>
+      <div className="pub-banner-actions">
+        <button onClick={() => set(true)} disabled={busy}>Re-fetch</button>
+        <button onClick={() => set(null)} disabled={busy}>Change answer</button>
+      </div>
+    </div>
+  );
+}
+
+
+// ============================================================================
+// Delta hero — side-by-side "Crossref now → After PDF fix"
+// ============================================================================
+
+function DeltaHero({ card }: { card: Scorecard }) {
+  const dep = card.deposited_score ?? 0;
+  const pdf = card.research_nexus_score ?? card.composite ?? 0;
+  const delta = pdf - dep;
+  const arrow = delta > 0 ? "+" : "";
+
+  // Build a per-dimension delta table inline so the publisher can see exactly
+  // which dimensions account for the lift. We index deposited dimensions by
+  // key for O(1) lookup against the PDF-side dimensions list.
+  const depDimByKey: Record<string, DimensionScore> = {};
+  (card.deposited_dimensions || []).forEach((d) => { depDimByKey[d.key] = d; });
+
+  return (
+    <div className="hero-delta">
+      <div className="hero-delta-row">
+        <div className="hero-delta-side">
+          <div className="hero-delta-label muted small">CROSSREF NOW</div>
+          <div className="hero-delta-num" style={{ color: scoreColor(dep) }}>{dep}</div>
+          <div className="hero-delta-sub muted small mono">
+            {card.deposited_summary?.publisher ? `${card.deposited_summary.publisher} · ` : ""}
+            Deposited
+          </div>
+        </div>
+        <div className="hero-delta-arrow">
+          <ArrowRightIcon size={28} />
+          <div className={`hero-delta-gain ${delta > 0 ? "is-up" : delta < 0 ? "is-down" : "is-flat"}`}>
+            {arrow}{delta}
+          </div>
+        </div>
+        <div className="hero-delta-side">
+          <div className="hero-delta-label muted small">AFTER PDF FIX</div>
+          <div className="hero-delta-num" style={{ color: scoreColor(pdf) }}>{pdf}</div>
+          <div className="hero-delta-sub muted small">
+            <span className={`mandatory-dot ${card.mandatory_ready ? "is-ready" : "is-blocked"}`} />
+            Mandatory {card.mandatory_present ?? 0}/{card.mandatory_total ?? 0}
+          </div>
+        </div>
+      </div>
+
+      <div className="hero-delta-bars">
+        {(card.dimensions || [])
+          .filter((d) => d.weight > 0)
+          .map((d) => {
+            const depD = depDimByKey[d.key];
+            const depScore = depD?.score ?? 0;
+            const pdfScore = d.score;
+            const lift = pdfScore - depScore;
+            return (
+              <div key={d.key} className="hero-delta-bar-row" title={d.description}>
+                <span className="hero-delta-bar-name">
+                  <strong>{d.label}</strong>
+                  <span className="muted small mono"> · {d.weight}% wt</span>
+                </span>
+                <div className="hero-delta-bar-stack">
+                  <div className="hero-delta-track" title={`Crossref now: ${depScore}%`}>
+                    <div className="hero-delta-fill is-deposited" style={{ width: `${depScore}%` }} />
+                  </div>
+                  <div className="hero-delta-track" title={`After PDF fix: ${pdfScore}%`}>
+                    <div className="hero-delta-fill is-pdf" style={{ width: `${pdfScore}%`, background: scoreColor(pdfScore) }} />
+                  </div>
+                </div>
+                <span className="hero-delta-bar-stat mono">
+                  <span className="muted">{depScore}%</span>
+                  {" → "}
+                  <strong style={{ color: scoreColor(pdfScore) }}>{pdfScore}%</strong>
+                  {lift !== 0 && (
+                    <span className={`muted small`}> · {lift > 0 ? "+" : ""}{lift}</span>
+                  )}
+                </span>
+              </div>
+            );
+          })}
+      </div>
+
+      <div className="hero-delta-caption muted small">
+        {delta > 0
+          ? `Your PDF could raise this article's metadata score by ${delta} points.`
+          : delta === 0
+          ? `Crossref already matches your PDF. Nothing left to deposit.`
+          : `Your PDF score is below what Crossref already has — check for fields you've rejected.`}
+      </div>
+    </div>
+  );
+}
+
 
 // ============================================================================
 
@@ -972,7 +1235,7 @@ function ReferencesView({ subId, mode }: { subId: number; mode: "all" | "with_do
 }
 
 function FieldCard({
-  subId, field, expanded, onToggleExpand, onConfirm, onReject, onAutofix, onRunStructurer, onLocate, busy,
+  subId, field, expanded, onToggleExpand, onConfirm, onReject, onAutofix, onRunStructurer, onLocate, onAcceptDeposited, busy,
 }: {
   subId: number;
   field: FieldScore;
@@ -983,6 +1246,7 @@ function FieldCard({
   onAutofix?: () => void;
   onRunStructurer?: () => void;
   onLocate: (page: number, boxIds: number[], joinedText: string, selections: LocateSelection[]) => Promise<void>;
+  onAcceptDeposited?: () => void;
   busy: boolean;
 }) {
   const state = deriveState(field);
@@ -998,7 +1262,7 @@ function FieldCard({
 
   const StateIcon = stateInfo.Icon;
   return (
-    <div className={`field-card field-state-${state}`}>
+    <div className={`field-card field-state-${state}`} data-field-key={field.key}>
       <div className="field-row" onClick={onToggleExpand}>
         <span className="field-icon" style={{ color: stateInfo.color }} title={stateInfo.label}>
           <StateIcon size={14} />
@@ -1024,6 +1288,25 @@ function FieldCard({
       {expanded && (
         <div className="field-detail">
           <p className="muted small">{field.why}</p>
+
+          {/* What Crossref currently has on file for this field. Shown
+              whenever the deposited value exists AND the local extraction
+              doesn't yet match it — i.e. a real one-click win for the editor.
+              State guard: only show on missing/needs_locate cards. On
+              confirmed/pending we already have something, so re-suggesting
+              the Crossref value would be noise. */}
+          {field.deposited_value_preview && (state === "missing" || state === "needs_locate") && (
+            <div className="deposited-suggestion">
+              <span className="deposited-suggestion-label small mono muted">CROSSREF DEPOSIT</span>
+              <span className="deposited-suggestion-value mono">{field.deposited_value_preview}</span>
+              {onAcceptDeposited && (
+                <button className="accent small" onClick={onAcceptDeposited} disabled={busy}
+                        title="Promote this Crossref-deposited value into local metadata. You can still re-locate from the PDF later.">
+                  Use Crossref value
+                </button>
+              )}
+            </div>
+          )}
 
           {field.key === "credit_roles" && (state === "confirmed" || state === "pending") && (
             <CreditContributionsView subId={subId} />
