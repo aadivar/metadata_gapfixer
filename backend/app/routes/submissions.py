@@ -244,6 +244,120 @@ def get_publication_status(sub_id: int):
     return _load_publication_status(sub_id)
 
 
+def _run_free_autofix(sub_id: int, fs, meta: dict) -> list[dict]:
+    """Run the free deterministic autofix pass over the rubric's high-bucket
+    actions (factsheet pulls, Docling title/abstract, layout-aware refs, etc.).
+    Mirrors POST /autofix/all but inlineable for the publication-status flow,
+    so the editor's 'Yes, published' click also triggers PDF extraction.
+    Returns the per-action reports; mutates `meta` in place and saves to disk."""
+    from ..services.autofix import run_autofix
+    from ..services.scoring import RUBRIC
+
+    with get_session() as s:
+        sub = s.get(Submission, sub_id)
+        docling_doc = (
+            json.loads(Path(sub.docling_json_path).read_text())
+            if sub and sub.docling_json_path else {}
+        )
+
+    reports: list[dict] = []
+    seen: set[str] = set()
+    for fd in RUBRIC:
+        if fd.bucket != "high" or not fd.autofix_action or fd.autofix_action in seen:
+            continue
+        seen.add(fd.autofix_action)
+        try:
+            reports.append(run_autofix(fd.autofix_action, meta, fs, docling_doc, sub_id=sub_id))
+        except Exception as exc:
+            log.warning("autofix %s failed for sub %s: %s", fd.autofix_action, sub_id, exc)
+            reports.append({"action": fd.autofix_action, "error": str(exc)})
+    _save_metadata(sub_id, meta)
+    sub_status_to_ready(sub_id)
+    return reports
+
+
+def _mandatory_metadata_paths() -> set[str]:
+    """All metadata paths owned by Mandatory-dimension rubric fields. Used by
+    the Crossref auto-import: for these paths, Crossref's deposited value is
+    canonical (it minted the DOI) and overrides any non-editor-confirmed
+    local value. For other paths, PDF extraction wins when it has anything."""
+    from ..services.scoring import RUBRIC, _FIELD_KEY_TO_PATHS
+    paths: set[str] = set()
+    for fd in RUBRIC:
+        if fd.dimension == "mandatory":
+            for p in _FIELD_KEY_TO_PATHS.get(fd.key, []):
+                paths.add(p)
+    return paths
+
+
+def _import_deposited_into_meta(meta: dict, deposited_meta: dict, deposited_doi: str,
+                                 fetched_at: str) -> list[str]:
+    """Copy Crossref-deposited values into local metadata under these rules:
+      - Skip paths where local provenance.source is `user_*` AND `confirmed=true`
+        (the editor explicitly worked on this; don't stomp).
+      - Mandatory-dim paths: Crossref wins, even if local already has a value
+        (Crossref's deposited record is canonical for the deposit minimum).
+      - Other paths: write only when local has nothing.
+      - Skip if Crossref has nothing for the path (None / "" / []).
+    Every imported path gets provenance source=`crossref_deposit`, confirmed=True,
+    with a back-pointer to the DOI + fetched_at timestamp.
+    Returns the list of paths actually written."""
+    mandatory_paths = _mandatory_metadata_paths()
+    prov = meta.setdefault("provenance", {})
+    wrote: list[str] = []
+    for path, value in deposited_meta.items():
+        if path == "provenance":
+            continue
+        if value is None or value == "" or value == []:
+            continue
+        local_prov = prov.get(path) or {}
+        src = (local_prov.get("source") or "")
+        if src.startswith("user_") and local_prov.get("confirmed"):
+            continue   # editor's manual work — respect it
+        is_mandatory = path in mandatory_paths
+        local_value = meta.get(path)
+        local_has_value = local_value not in (None, "", [])
+        if local_has_value and not is_mandatory:
+            continue   # PDF wins for non-mandatory; Crossref only fills gaps
+        meta[path] = value
+        prov[path] = {
+            "source": "crossref_deposit",
+            "confidence": 1.0,
+            "confirmed": True,
+            "reasoning": "Auto-imported from the Crossref deposit when the editor confirmed publication status + DOI.",
+            "deposited_doi": deposited_doi,
+            "deposited_at": fetched_at,
+        }
+        wrote.append(path)
+    return wrote
+
+
+def _maybe_import_deposited(sub_id: int, fs, meta: dict) -> tuple[list[str], object | None]:
+    """If publication_status.published is True AND a confirmed DOI exists,
+    fetch the Crossref deposit and import its fields into local metadata.
+    Returns (paths_written, DepositedResult|None). Both endpoints (publication
+    status set + DOI locate) call this so the import happens whichever order
+    the editor performs the two actions."""
+    pub = _load_publication_status(sub_id)
+    if pub.get("published") is not True:
+        return ([], None)
+    confirmed_doi = _confirmed_doi_from_meta(meta)
+    if not confirmed_doi:
+        return ([], None)
+    try:
+        from ..services.crossref_score import fetch_deposited_score
+        result = fetch_deposited_score(confirmed_doi)
+    except Exception as exc:
+        log.warning("crossref auto-import fetch failed for sub %s: %s", sub_id, exc)
+        return ([], None)
+    if result is None:
+        return ([], None)
+    wrote = _import_deposited_into_meta(meta, result.deposited_meta, result.doi, result.fetched_at)
+    if wrote:
+        _save_metadata(sub_id, meta)
+    return (wrote, result)
+
+
 @router.post("/{sub_id}/publication_status")
 def post_publication_status(sub_id: int, req: PublicationStatusRequest):
     payload = {
@@ -251,12 +365,35 @@ def post_publication_status(sub_id: int, req: PublicationStatusRequest):
         "set_at": datetime.utcnow().isoformat(timespec="seconds"),
     }
     _save_publication_status(sub_id, payload)
-    # Recompute score so the GUI gets the new deposited-side data in one round-trip
+
     from ..services.scoring import score
     fs = _load_factsheet(sub_id)
     meta = _load_metadata(sub_id)
+
+    # When the editor commits to "Yes, published" we earn the right to do
+    # the heavier free work in one round-trip:
+    #   1. Run free PDF extraction (autofix/all) so the PDF-derived metadata
+    #      isn't empty when they land on the delta view.
+    #   2. If a DOI is also confirmed, fetch Crossref and auto-import its
+    #      deposited values (canonical for mandatory; fill-gaps elsewhere).
+    # Both are idempotent: the editor can flip the answer and we re-run
+    # safely.
+    autofix_reports: list[dict] = []
+    imported_paths: list[str] = []
+    if req.published is True:
+        autofix_reports = _run_free_autofix(sub_id, fs, meta)
+        meta = _load_metadata(sub_id)   # autofix mutated + saved meta
+        imported_paths, _ = _maybe_import_deposited(sub_id, fs, meta)
+        meta = _load_metadata(sub_id)
+
     sc = _attach_deposited(sub_id, fs, meta, score(fs, meta))
-    return {"ok": True, "publication_status": payload, "score": sc.model_dump()}
+    return {
+        "ok": True,
+        "publication_status": payload,
+        "autofix_reports": autofix_reports,
+        "imported_from_crossref": imported_paths,
+        "score": sc.model_dump(),
+    }
 
 
 # --- Scorecard -------------------------------------------------------------
@@ -874,11 +1011,28 @@ def post_locate(sub_id: int, req: LocateRequest):
             pass
 
     _save_metadata(sub_id, meta)
+
+    # If the editor just located the DOI AND has already confirmed the article
+    # is published, auto-import the Crossref deposit. This way the order in
+    # which the editor performs the two actions ("Yes, published" vs "Locate
+    # DOI") doesn't matter — either order ends in a populated metadata +
+    # deposited delta view.
+    imported_paths: list[str] = []
+    if req.field_path == "doi":
+        try:
+            imported_paths, _ = _maybe_import_deposited(sub_id, fs, meta)
+            if imported_paths:
+                meta = _load_metadata(sub_id)
+        except Exception as exc:
+            log.warning("post-locate crossref auto-import failed for sub %s: %s", sub_id, exc)
+
+    sc = _attach_deposited(sub_id, fs, meta, score(fs, meta))
     return {
         "ok": True,
         "field_path": req.field_path,
         "value": value,
-        "score": score(fs, meta).model_dump(),
+        "imported_from_crossref": imported_paths,
+        "score": sc.model_dump(),
     }
 
 
